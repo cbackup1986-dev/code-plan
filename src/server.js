@@ -402,6 +402,14 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
           } else {
             // 正常 thinking 内容，发给客户端
             const text = delta.reasoning_content;
+
+            // ★ 改进：如果推理内容仅仅是单个空格或特定的占位符，且还没有真正的思考内容，直接忽略
+            // 避免在 UI 中产生一个空洞的 "Thinking" 块。只有当内容非占位符时才开启 block。
+            const isPlaceholder = (text === ' ' || text === 'Thought process preserved.');
+            if (isPlaceholder && !thinkingContent) {
+              return;
+            }
+
             if (!reasoningBlockOpen) {
               if (textBlockOpen) {
                 send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
