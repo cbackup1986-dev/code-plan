@@ -407,7 +407,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
             // 避免在 UI 中产生一个空洞的 "Thinking" 块。只有当内容非占位符时才开启 block。
             const isPlaceholder = (text === ' ' || text === 'Thought process preserved.');
             if (isPlaceholder && !thinkingContent) {
-              return;
+              continue;
             }
 
             if (!reasoningBlockOpen) {
