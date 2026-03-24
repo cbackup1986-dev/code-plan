@@ -28,8 +28,11 @@ export function convertRequest(anthropicBody, provider) {
   }
 
   // 转换每条消息
+  // ★ 修复：Kimi/SiliconFlow 不需要 reasoning_content 占位符，反而会触发退化
+  // 只有明确声明 requiresReasoningPlaceholder 的 provider 才注入
+  const requiresReasoningPlaceholder = !!provider.requiresReasoningPlaceholder;
   for (const msg of (anthropicBody.messages || [])) {
-    const converted = convertMessage(msg);
+    const converted = convertMessage(msg, requiresReasoningPlaceholder);
     if (Array.isArray(converted)) messages.push(...converted);
     else if (converted) messages.push(converted);
   }
@@ -82,7 +85,7 @@ function injectObservationIfNeeded(messages) {
   }
 }
 
-function convertMessage(msg) {
+function convertMessage(msg, requiresReasoningPlaceholder = false) {
   const { role, content } = msg;
   if (typeof content === 'string') return { role, content };
   if (!Array.isArray(content)) return { role, content: String(content) };
@@ -128,7 +131,14 @@ function convertMessage(msg) {
       role: 'assistant',
       content: textBlocks.map(b => b.text).join('') || null,
       // 修复 Kimi-K2.5 400 错误：如果历史中缺失推理内容，必须注入占位符
-      reasoning_content: reasoningStr || "Thought process preserved.",
+      // ★ 修复：只在 provider 明确需要时才注入占位符
+      //   Kimi-K2.5 收到 "Thought process preserved." 后会退化成只输出 thinking
+      ...(requiresReasoningPlaceholder && !reasoningStr
+        ? { reasoning_content: 'Thought process preserved.' }
+        : reasoningStr
+          ? { reasoning_content: reasoningStr }
+          : {}
+      ),
       tool_calls: toolUses.map((tu, i) => ({
         id: tu.id || `call_${i}_${Date.now()}`,
         type: 'function',

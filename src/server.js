@@ -1,12 +1,11 @@
 /**
  * Code Plan Proxy — 完整优化版
  *
- * 新增:
- * 1. 请求超时保护（AbortController）
- * 2. 自动重试（后端 5xx / 429 最多重试 2 次，指数退避）
- * 3. ThinkingFilter 流式过滤 <think> 块（R1 模型）
- * 4. 结构化请求日志（方便调试 Agent 循环断点）
- * 5. 观察后推理注入（converter 层已实现，server 透传 provider）
+ * 修复:
+ * 1. stop_reason 基于 hasToolCalls 强制判断，不依赖 finish_reason 时序
+ * 2. text block / tool block 各自独立追踪 blockIndex，消除关闭时 index 冲突
+ * 3. 新增 /v1/models 端点（OpenClaw / Cursor 兼容）
+ * 4. 流结束后 stop_reason 判断移到所有 block 关闭之后
  */
 import express from 'express';
 import { randomUUID } from 'crypto';
@@ -23,6 +22,7 @@ import {
   mapStopReason, ToolCallAccumulator, ThinkingFilter, repairJSON,
 } from './converter.js';
 import { getProvider } from './providers.js';
+import { routeRequest } from './router.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -39,7 +39,7 @@ app.use((req, res, next) => {
 });
 
 // ─── 结构化日志 ────────────────────────────────────────────────────────────
-const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // debug | info | warn | error
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
 function log(level, reqId, msg, data = {}) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -78,7 +78,7 @@ function anthropicError(type, message) {
   return { type: 'error', error: { type, message } };
 }
 
-// ─── 带超时和重试的 fetch ★ ────────────────────────────────────────────────
+// ─── 带超时和重试的 fetch ──────────────────────────────────────────────────
 async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -89,18 +89,16 @@ async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2) {
       const res = await fetch(url, { ...options, signal: ctrl.signal });
       clearTimeout(timer);
 
-      // 不重试流式请求的错误（响应体已开始消费）
       if (res.ok) return res;
 
-      // 429 / 5xx 重试
       if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
-        const wait = (attempt + 1) * 1500; // 1.5s, 3s
+        const wait = (attempt + 1) * 1500;
         lastErr = new Error(`Backend ${res.status}`);
         await sleep(wait);
         continue;
       }
 
-      return res; // 4xx 等不重试，直接返回
+      return res;
     } catch (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') {
@@ -117,6 +115,21 @@ async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ─── /v1/models — OpenClaw / Cursor 兼容端点 ★ ────────────────────────────
+app.get(['/v1/models', '/models'], authenticate, (req, res) => {
+  res.json({
+    object: 'list',
+    data: [
+      { id: 'claude-sonnet-4-20250514',  object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { id: 'claude-opus-4-20250514',    object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { id: 'claude-haiku-4-5-20251001', object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { id: 'claude-sonnet-4-5',         object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { id: 'claude-opus-4-5',           object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { id: 'claude-haiku-4-5',          object: 'model', created: 1700000000, owned_by: 'anthropic' },
+    ],
+  });
+});
+
 // ─── /v1/messages ──────────────────────────────────────────────────────────
 app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   const { user } = req;
@@ -125,7 +138,6 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   const isStream = body.stream === true;
   const originalModel = body.model || 'claude-sonnet-4-20250514';
 
-  // 配额检查
   const quota = checkAndConsumeQuota(user.id, user.quota_per_window, user.window_seconds);
   if (!quota.allowed) {
     const resetISO = new Date(quota.resetAt * 1000).toISOString();
@@ -135,7 +147,32 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   }
 
   const provider = getProvider(user.provider || 'nvidia');
-  const converted = convertRequest(body, provider);
+
+  // ★ 智能路由：auto_router provider 先识别意图，再动态选模型
+  let routeDecision = null;
+  if (provider.isRouter) {
+    try {
+      routeDecision = await routeRequest(
+        body.messages || [],
+        body.tools,
+        originalModel,
+        { apiKey: provider.apiKey, endpoint: provider.endpoint },
+      );
+    } catch (err) {
+      log('warn', requestId, 'router_failed', { error: err.message });
+    }
+  }
+
+  // 如果路由成功，动态覆盖 provider 的 modelMap
+  const effectiveProvider = routeDecision
+    ? {
+        ...provider,
+        endpoint: provider.backendEndpoint || provider.endpoint + '/chat/completions',
+        modelMap: { default: routeDecision.model },
+      }
+    : provider;
+
+  const converted = convertRequest(body, effectiveProvider);
   const startTime = Date.now();
 
   log('info', requestId, 'request', {
@@ -143,6 +180,12 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
     model: originalModel,
     backend: converted.model,
     provider: user.provider,
+    ...(routeDecision ? {
+      routed_intent: routeDecision.intent,
+      routed_model: routeDecision.model,
+      route_method: routeDecision.method,
+      route_latency_ms: routeDecision.latency_ms,
+    } : {}),
     stream: isStream,
     messages: body.messages?.length,
     hasTools: !!body.tools?.length,
@@ -152,10 +195,15 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
     writeFileSync('e:/ai/code-plan-proxy/code-plan/last_request.json', JSON.stringify(converted, null, 2));
   } catch(e) {}
 
+  // 转发端点：auto_router 用 backendEndpoint，其他用 provider.endpoint
+  const forwardEndpoint = routeDecision
+    ? (provider.backendEndpoint || provider.endpoint + '/chat/completions')
+    : provider.endpoint;
+
   let backendRes;
   try {
     backendRes = await fetchWithRetry(
-      provider.endpoint,
+      forwardEndpoint,
       {
         method: 'POST',
         headers: {
@@ -226,7 +274,7 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   }
 });
 
-// ─── 流式处理 ★ ─────────────────────────────────────────────────────────────
+// ─── 流式处理 ★ 完整修复版 ───────────────────────────────────────────────────
 async function handleStream(stream, res, originalModel, requestId, provider, startTime) {
   const msgId = `msg_${requestId.replace(/-/g, '').slice(0, 24)}`;
   let inputTokens = 0, outputTokens = 0;
@@ -234,7 +282,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
   const send = (event, data) => {
     console.log(`DEBUG [${requestId}] send event: ${event}`, JSON.stringify(data).slice(0, 150));
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  }
+  };
 
   send('message_start', {
     type: 'message_start',
@@ -247,30 +295,39 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
   });
   send('ping', { type: 'ping' });
 
+  // ★ 修复：text block 和 reasoning block 各自独立记录 blockIndex
+  let textBlockIndex = -1;       // text block 占用的 index
   let textBlockOpen = false;
+  let reasoningBlockIndex = -1;  // reasoning block 占用的 index
   let reasoningBlockOpen = false;
+
   const toolAcc = new ToolCallAccumulator();
   const suppressedIndices = new Set();
   let hasToolCalls = false;
   let finishReason = null;
   let usageFromChunk = null;
 
-  // ★ 思维链过滤器（R1 模型专用）
   const thinkFilter = provider.stripThinking ? new ThinkingFilter() : null;
 
   let buffer = '';
   let thinkingContent = '';
+
+  // Kimi-K2.5 私有格式：工具调用通过 reasoning_content 传出，带特殊标记
+  let kimiReasoningBuf = '';   // 积累全部 reasoning_content
+  let kimiInToolSection = false; // 是否已进入工具调用区段
+
+  // ★ 全局 block index 计数器，所有 block（text/reasoning/tool）统一分配
+  let nextBlockIndex = 0;
+
+  // tool block 映射：OpenAI tool index -> Anthropic block index
+  const validToolBlockIndices = new Map();
 
   let chunkCount = 0;
   const pingInterval = setInterval(() => {
     if (chunkCount === 0) {
       send('ping', { type: 'ping' });
     }
-  }, 15000); // Send ping every 15s until data arrives
-  
-  // Track tool block mapping: OpenAI index -> Anthropic block index
-  let currentBlockIndex = 0;
-  const validToolBlockIndices = new Map();
+  }, 15000);
 
   try {
     const decoder = new TextDecoder();
@@ -299,60 +356,82 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
         if (data.usage) usageFromChunk = data.usage;
         if (!delta) continue;
 
-        // 文本 delta —— 经过 thinking filter
+        // ── 文本 delta ──────────────────────────────────────────────────────
         if (delta.content) {
           console.log(`DEBUG [${requestId}] content:`, delta.content);
           const text = thinkFilter ? thinkFilter.feed(delta.content) : delta.content;
           if (text) {
-            // 如果还在推理中，先关掉推理块
+            // reasoning block 如果还开着，先关掉
             if (reasoningBlockOpen) {
-              send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
+              send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
               reasoningBlockOpen = false;
-              currentBlockIndex++;
             }
             if (!textBlockOpen) {
+              textBlockIndex = nextBlockIndex++;
               send('content_block_start', {
-                type: 'content_block_start', index: currentBlockIndex,
+                type: 'content_block_start', index: textBlockIndex,
                 content_block: { type: 'text', text: '' },
               });
               textBlockOpen = true;
             }
             send('content_block_delta', {
-              type: 'content_block_delta', index: currentBlockIndex,
+              type: 'content_block_delta', index: textBlockIndex,
               delta: { type: 'text_delta', text },
             });
             outputTokens++;
           }
         }
 
-        // 推理 delta (SiliconFlow/Kimi)
-        if (delta.reasoning_content) {
-          console.log(`DEBUG [${requestId}] reasoning:`, delta.reasoning_content);
-          if (!reasoningBlockOpen) {
-            // 如果还在发文本，关掉它（理论上推理应在文本之前）
-            if (textBlockOpen) {
-              send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
-              textBlockOpen = false;
-              currentBlockIndex++;
-            }
-            send('content_block_start', {
-              type: 'content_block_start', index: currentBlockIndex,
-              content_block: { type: 'thinking', thinking: '' },
-            });
-            reasoningBlockOpen = true;
+        // ── 推理 delta ──────────────────────────────────────────────────────
+        // Kimi-K2.5 在 SiliconFlow 上有一个严重 bug：
+        //   它不通过标准 tool_calls 字段输出工具调用，而是把整个工具调用序列
+        //   （包括私有标记 <|tool_calls_section_begin|> 和 JSON）塞进 reasoning_content
+        // 需要：1) 识别这个标记  2) 从 reasoning 里解析出工具调用  3) 正常转发
+        const hasToolCallsInThisChunk = !!(delta.tool_calls?.length);
+        if (delta.reasoning_content && !hasToolCallsInThisChunk) {
+          kimiReasoningBuf += delta.reasoning_content;
+
+          // 检测到 Kimi 私有工具调用标记
+          if (kimiReasoningBuf.includes('<|tool_calls_section_begin|>')) {
+            kimiInToolSection = true;
           }
-          send('content_block_delta', {
-            type: 'content_block_delta', index: currentBlockIndex,
-            delta: { type: 'thinking_delta', thinking: delta.reasoning_content },
-          });
-          thinkingContent += delta.reasoning_content;
+
+          if (kimiInToolSection) {
+            // 积累工具调用 JSON，等流结束后统一解析
+            // 不发送到客户端（不是真正的 thinking）
+          } else {
+            // 正常 thinking 内容，发给客户端
+            const text = delta.reasoning_content;
+            if (!reasoningBlockOpen) {
+              if (textBlockOpen) {
+                send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+                textBlockOpen = false;
+              }
+              reasoningBlockIndex = nextBlockIndex++;
+              send('content_block_start', {
+                type: 'content_block_start', index: reasoningBlockIndex,
+                content_block: { type: 'thinking', thinking: '' },
+              });
+              reasoningBlockOpen = true;
+            }
+            send('content_block_delta', {
+              type: 'content_block_delta', index: reasoningBlockIndex,
+              delta: { type: 'thinking_delta', thinking: text },
+            });
+            thinkingContent += text;
+          }
         }
 
-        // Tool call
+        // reasoning block 结束：有标准 tool_calls 时关闭
+        if (hasToolCallsInThisChunk && reasoningBlockOpen) {
+          send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
+          reasoningBlockOpen = false;
+        }
+
+        // ── 工具调用 delta ──────────────────────────────────────────────────
         if (delta.tool_calls?.length) {
-          // console.log('DEBUG: Received Tool Call from Backend:', JSON.stringify(delta.tool_calls));
           for (const tc of delta.tool_calls) {
-            const idx = tc.index || 0;
+            const idx = tc.index ?? 0;
             if (tc.function?.name === 'think') {
               suppressedIndices.add(idx);
               continue;
@@ -362,19 +441,17 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
             hasToolCalls = true;
 
             if (tc.id) {
+              // 新工具块开始：先关闭 reasoning/text block
               if (reasoningBlockOpen) {
-                send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
+                send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
                 reasoningBlockOpen = false;
-                currentBlockIndex++;
               }
               if (textBlockOpen) {
-                send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
+                send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
                 textBlockOpen = false;
-                currentBlockIndex++;
               }
 
-              // Since OpenAI can stream parallel tools, we just allocate a new block index for each new tool id.
-              const blockIdx = currentBlockIndex++;
+              const blockIdx = nextBlockIndex++;
               validToolBlockIndices.set(idx, blockIdx);
 
               send('content_block_start', {
@@ -405,31 +482,96 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
     clearInterval(pingInterval);
   }
 
-  // 关闭文本块或所有的工具块
+  // ── Kimi 私有格式工具调用解析 ────────────────────────────────────────────
+  // 如果检测到了 <|tool_calls_section_begin|>，从积累的 buf 里解析工具调用
+  // 格式示例（reasoning_content 积累后）：
+  //   ...正常思考...<|tool_calls_section_begin|>[{"name":"browser","parameters":{...}}]
+  if (kimiInToolSection && kimiReasoningBuf.includes('<|tool_calls_section_begin|>')) {
+    try {
+      const marker = '<|tool_calls_section_begin|>';
+      const jsonStart = kimiReasoningBuf.indexOf(marker) + marker.length;
+      let jsonStr = kimiReasoningBuf.slice(jsonStart).trim();
+
+      // 可能有结束标记，截断
+      const endMarker = '<|tool_calls_section_end|>';
+      if (jsonStr.includes(endMarker)) {
+        jsonStr = jsonStr.slice(0, jsonStr.indexOf(endMarker));
+      }
+
+      const kimiTools = JSON.parse(jsonStr);
+      log('info', requestId, 'kimi_private_toolcall_parsed', {
+        count: kimiTools.length,
+        names: kimiTools.map(t => t.name),
+      });
+
+      // 关闭 reasoning block（如果还开着）
+      if (reasoningBlockOpen) {
+        send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
+        reasoningBlockOpen = false;
+      }
+      if (textBlockOpen) {
+        send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+        textBlockOpen = false;
+      }
+
+      // 把解析出的工具调用转成标准 Anthropic tool_use blocks
+      for (let i = 0; i < kimiTools.length; i++) {
+        const kt = kimiTools[i];
+        if (!kt.name) continue;
+        const blockIdx = nextBlockIndex++;
+        const toolId = `toolu_kimi_${requestId.replace(/-/g,'').slice(0,16)}_${i}`;
+
+        send('content_block_start', {
+          type: 'content_block_start', index: blockIdx,
+          content_block: { type: 'tool_use', id: toolId, name: kt.name },
+        });
+        const argsStr = JSON.stringify(kt.parameters ?? kt.arguments ?? kt.input ?? {});
+        send('content_block_delta', {
+          type: 'content_block_delta', index: blockIdx,
+          delta: { type: 'input_json_delta', partial_json: argsStr },
+        });
+        send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+
+        // 标记为有工具调用（影响 stop_reason）
+        hasToolCalls = true;
+        // 防止下面的 validToolBlockIndices 循环重复关闭
+        validToolBlockIndices.set(`kimi_${i}`, -1); // -1 表示已关闭
+      }
+    } catch (err) {
+      log('warn', requestId, 'kimi_toolcall_parse_failed', { error: err.message, buf: kimiReasoningBuf.slice(-200) });
+    }
+  }
+
+  // ★ 修复：按独立 index 关闭各 block，顺序：reasoning → text → tools
   if (reasoningBlockOpen) {
-    send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
+    send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
+    reasoningBlockOpen = false;
   }
 
   if (textBlockOpen) {
-    send('content_block_stop', { type: 'content_block_stop', index: currentBlockIndex });
-  } 
-  
-  if (validToolBlockIndices.size > 0) {
-    for (const blockIdx of validToolBlockIndices.values()) {
-      send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
-    }
-  } 
-  
-  if (currentBlockIndex === 0 && !textBlockOpen && validToolBlockIndices.size === 0) {
-    // 啥都没有，发个空的
+    send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+    textBlockOpen = false;
+  }
+
+  for (const blockIdx of validToolBlockIndices.values()) {
+    if (blockIdx === -1) continue; // 已由 Kimi 解析器关闭，跳过
+    send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+  }
+
+  // 兜底：没有任何内容时发空 text block
+  if (nextBlockIndex === 0) {
     send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
     send('content_block_stop', { type: 'content_block_stop', index: 0 });
   }
 
-  const stopReason = mapStopReason(finishReason, hasToolCalls);
+  // ★ 修复：stop_reason 必须在所有 block 关闭后判断
+  // 只要有工具调用，无论 finish_reason 是什么，都返回 tool_use
+  // 这修复了 finish_reason 为 null/stop 时 OpenClaw loop 中断的问题
+  const stopReason = hasToolCalls ? 'tool_use' : mapStopReason(finishReason, false);
+
   const finalOutput = usageFromChunk?.completion_tokens || outputTokens;
   inputTokens = usageFromChunk?.prompt_tokens || 0;
-  
+
   const thinkingTokens = thinkFilter
     ? Math.ceil(thinkFilter.getThinking().length / 4)
     : Math.ceil(thinkingContent.length / 4);
@@ -461,16 +603,16 @@ app.get('/admin', (_, res) => {
   res.send(existsSync(p) ? readFileSync(p, 'utf8') : '<h1>Dashboard not found</h1>');
 });
 
-app.post('/admin/users',    adminAuth, (req, res) => {
+app.post('/admin/users',      adminAuth, (req, res) => {
   try { res.json(createUser(req.body)); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/admin/users',     adminAuth, (_, res) => res.json(getUsers()));
+app.get('/admin/users',       adminAuth, (_, res) => res.json(getUsers()));
 app.patch('/admin/users/:id', adminAuth, (req, res) => {
   const u = updateUser(req.params.id, req.body);
   u ? res.json(u) : res.status(404).json({ error: 'Not found' });
 });
-app.get('/admin/stats',     adminAuth, (req, res) =>
+app.get('/admin/stats',       adminAuth, (req, res) =>
   res.json(getStats(req.query.user_id, parseInt(req.query.days || 7))));
 
 app.get('/v1/usage', authenticate, (req, res) => {
@@ -487,7 +629,7 @@ app.get('/v1/usage', authenticate, (req, res) => {
 
 app.get('/health', (_, res) => res.json({ status: 'ok', ts: Date.now() }));
 
-// ★ 404 Logging
+// 404
 app.use((req, res) => {
   log('warn', '-', '404_not_found', { path: req.path, method: req.method, ip: req.ip });
   res.status(404).json(anthropicError('not_found_error', `Endpoint ${req.path} not found`));
