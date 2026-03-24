@@ -104,6 +104,12 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
     }).join('\n').trim();
   }
 
+  // ★ 历史记录清洗：将旧的占位符 "Thought process preserved." 映射到新的 " "
+  // 避免 Kimi-K2.5 看到历史中的旧占位符后出现死循环、退化或重复输出
+  if (reasoningStr === 'Thought process preserved.') {
+    reasoningStr = ' ';
+  }
+
   // ★ 兼容性增强：如果原生字段缺失，尝试从 text blocks 中提取 <think> 标签
   const textBlocks = content.filter(b => b.type === 'text');
   if (!reasoningStr && textBlocks.length > 0) {
@@ -181,7 +187,12 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
   return { 
     role, 
     content: textStr || null,
-    ...(reasoningStr ? { reasoning_content: reasoningStr } : {})
+    ...(requiresReasoningPlaceholder && !reasoningStr
+      ? { reasoning_content: ' ' }
+      : reasoningStr
+        ? { reasoning_content: reasoningStr }
+        : {}
+    ),
   };
 }
 

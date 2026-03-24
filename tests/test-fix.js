@@ -62,3 +62,21 @@ const res3 = convertRequest(req3, mockProvider);
 console.log('res3 reasoning:', JSON.stringify(res3.messages[1].reasoning_content));
 if (res3.messages[1].reasoning_content === ' ') console.log('✅ Pass');
 else { console.log('❌ Fail'); process.exit(1); }
+
+console.log('\n--- Test Case 4: History Sanitization (Old Placeholder) ---');
+const req4 = {
+  model: 'claude-sonnet-4-5',
+  messages: [
+    { 
+      role: 'assistant', 
+      content: [
+        { type: 'text', text: 'Old response' },
+        { type: 'thinking', thinking: 'Thought process preserved.' }
+      ] 
+    }
+  ]
+};
+const res4 = convertRequest(req4, mockProvider);
+console.log('res4 reasoning:', JSON.stringify(res4.messages[1].reasoning_content));
+if (res4.messages[1].reasoning_content === ' ') console.log('✅ Pass');
+else { console.log('❌ Fail'); process.exit(1); }
