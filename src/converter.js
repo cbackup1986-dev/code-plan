@@ -90,17 +90,32 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
   if (typeof content === 'string') return { role, content };
   if (!Array.isArray(content)) return { role, content: String(content) };
 
-  // 提取推理内容（如果有）
+  // 提取推理内容（具有原生 thinking 类型优先）
   let reasoningStr = '';
   const reasoningBlocks = content.filter(b => b.type === 'reasoning_content' || b.type === 'thinking');
   if (reasoningBlocks.length > 0) {
     reasoningStr = reasoningBlocks.map(b => {
       if (b.type === 'thinking') return b.thinking || '';
       if (b.type === 'reasoning_content') {
-        return (typeof b.reasoning_content === 'object') ? (b.reasoning_content.thinking || '') : String(b.reasoning_content);
+        const rc = b.reasoning_content;
+        return (typeof rc === 'object') ? (rc.thinking || '') : String(rc);
       }
       return '';
     }).join('\n').trim();
+  }
+
+  // ★ 兼容性增强：如果原生字段缺失，尝试从 text blocks 中提取 <think> 标签
+  const textBlocks = content.filter(b => b.type === 'text');
+  if (!reasoningStr && textBlocks.length > 0) {
+    for (const b of textBlocks) {
+      const match = b.text.match(/<think>([\s\S]*?)<\/think>/);
+      if (match) {
+        reasoningStr = match[1].trim();
+        // 从原文中剥离 <think> 块，避免重复发送
+        b.text = b.text.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+        break;
+      }
+    }
   }
 
   // tool_result → OpenAI tool role
@@ -112,7 +127,6 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
       content: extractText(tr.content),
     }));
 
-    const textBlocks = content.filter(b => b.type === 'text');
     if (textBlocks.length > 0) {
       const textStr = textBlocks.map(b => b.text).join('\n').trim();
       if (textStr) {
@@ -125,16 +139,15 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
 
   // assistant with tool_use
   const toolUses = content.filter(b => b.type === 'tool_use');
-  const textBlocks = content.filter(b => b.type === 'text');
   if (toolUses.length > 0) {
     return {
       role: 'assistant',
       content: textBlocks.map(b => b.text).join('') || null,
       // 修复 Kimi-K2.5 400 错误：如果历史中缺失推理内容，必须注入占位符
       // ★ 修复：只在 provider 明确需要时才注入占位符
-      //   Kimi-K2.5 收到 "Thought process preserved." 后会退化成只输出 thinking
+      //   注意：Kimi-K2.5 若收到 "Thought process preserved." 会退化成只输出 thinking，故改为空格
       ...(requiresReasoningPlaceholder && !reasoningStr
-        ? { reasoning_content: 'Thought process preserved.' }
+        ? { reasoning_content: ' ' }
         : reasoningStr
           ? { reasoning_content: reasoningStr }
           : {}
