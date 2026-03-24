@@ -1,0 +1,9 @@
+node_modules/
+data/
+.env
+*.log
+.DS_Store
+last_request.json
+test_user.json
+*.code-workspace
+proxy-debug.log

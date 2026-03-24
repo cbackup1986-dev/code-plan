@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code Plan — Admin Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --text: #e2e4ed; --muted: #6b7280; --accent: #6366f1;
+    --green: #10b981; --red: #ef4444; --amber: #f59e0b;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 14px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 16px; height: 56px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header span { color: var(--muted); font-size: 12px; }
+  #admin-key-bar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; gap: 8px; align-items: center; }
+  #admin-key-bar input { flex: 1; max-width: 340px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 13px; }
+  #admin-key-bar button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .stat-card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .stat-card .value { font-size: 26px; font-weight: 700; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 24px; overflow: hidden; }
+  section .sec-header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  section .sec-header h2 { font-size: 14px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th { background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 500; text-align: left; padding: 10px 16px; }
+  td { padding: 11px 16px; border-top: 1px solid var(--border); font-size: 13px; }
+  td code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 12px; }
+  .badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500; }
+  .badge.on  { background: #10b98120; color: var(--green); }
+  .badge.off { background: #ef444420; color: var(--red); }
+  .btn { border: none; border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  .btn.sm-red    { background: #ef444420; color: var(--red); }
+  .btn.sm-green  { background: #10b98120; color: var(--green); }
+  .btn.primary   { background: var(--accent); color: #fff; padding: 7px 16px; font-size: 13px; }
+  form.inline { display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 20px; }
+  form.inline input, form.inline select { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; color: var(--text); font-size: 13px; }
+  form.inline input { flex: 1; min-width: 120px; }
+  .empty { padding: 32px; text-align: center; color: var(--muted); }
+  .copy-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 11px; padding: 0 4px; }
+  .copy-btn:hover { color: var(--text); }
+  #toast { position: fixed; bottom: 24px; right: 24px; background: var(--green); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Code Plan</h1>
+  <span>Admin Dashboard</span>
+</header>
+
+<div id="admin-key-bar">
+  <label style="color:var(--muted);font-size:12px;white-space:nowrap">Admin Key:</label>
+  <input type="password" id="admin-key" placeholder="Enter ADMIN_KEY..." />
+  <button onclick="load()">Load Data</button>
+</div>
+
+<main>
+  <div class="grid" id="stat-cards">
+    <div class="stat-card"><div class="label">Total Requests (7d)</div><div class="value" id="s-req">—</div></div>
+    <div class="stat-card"><div class="label">Total Tokens (7d)</div><div class="value" id="s-tok">—</div></div>
+    <div class="stat-card"><div class="label">Avg Latency</div><div class="value" id="s-lat">—</div></div>
+    <div class="stat-card"><div class="label">Active Users</div><div class="value" id="s-usr">—</div></div>
+  </div>
+
+  <section>
+    <div class="sec-header">
+      <h2>User Management</h2>
+    </div>
+    <form class="inline" onsubmit="createUser(event)">
+      <input id="f-username" placeholder="Username" required />
+      <input id="f-quota" type="number" value="120" min="1" style="width:90px" placeholder="Quota" />
+      <input id="f-window" type="number" value="18000" min="60" style="width:100px" placeholder="Window(s)" />
+      <select id="f-provider">
+        <option value="nvidia" selected>NVIDIA Build</option>
+        <option value="glm">Zhipu GLM</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="qwen">Alibaba Qwen</option>
+        <option value="ollama">Local Ollama</option>
+      </select>
+      <button class="btn primary" type="submit">+ Create User</button>
+    </form>
+    <table id="users-table">
+      <thead><tr><th>Username</th><th>API Key</th><th>Quota / Window</th><th>Provider</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="users-body"><tr><td colspan="6" class="empty">Click "Load Data"</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-header"><h2>Daily Requests (7d)</h2></div>
+    <table id="daily-table">
+      <thead><tr><th>Date</th><th>Requests</th><th>Tokens</th></tr></thead>
+      <tbody id="daily-body"><tr><td colspan="3" class="empty">—</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const BASE = '';
+
+function adminHeaders() {
+  return { 'Content-Type': 'application/json', 'x-admin-key': document.getElementById('admin-key').value };
+}
+
+function toast(msg, color='var(--green)') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block'; t.style.background = color;
+  setTimeout(() => t.style.display = 'none', 2500);
+}
+
+async function load() {
+  const [usersRes, statsRes] = await Promise.all([
+    fetch(`${BASE}/admin/users`, { headers: adminHeaders() }),
+    fetch(`${BASE}/admin/stats?days=7`, { headers: adminHeaders() }),
+  ]);
+  if (!usersRes.ok) return toast('Auth failed, check Admin Key', 'var(--red)');
+
+  const users = await usersRes.json();
+  const stats = await statsRes.json();
+
+  // Stats cards
+  document.getElementById('s-req').textContent = stats.totals?.total_requests?.toLocaleString() || '0';
+  const tok = (stats.totals?.total_input_tokens || 0) + (stats.totals?.total_output_tokens || 0);
+  document.getElementById('s-tok').textContent = tok > 1000 ? (tok/1000).toFixed(1)+'K' : tok;
+  document.getElementById('s-lat').textContent = stats.totals?.avg_latency_ms ? Math.round(stats.totals.avg_latency_ms)+'ms' : '—';
+  document.getElementById('s-usr').textContent = users.filter(u => u.active).length;
+
+  // Users table
+  const tbody = document.getElementById('users-body');
+  tbody.innerHTML = users.length ? users.map(u => `
+    <tr>
+      <td>${u.username}</td>
+      <td><code>${u.api_key}</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('${u.api_key}').then(()=>toast('Copied'))">Copy</button>
+      </td>
+      <td>${u.quota_per_window} req / ${Math.round(u.window_seconds/3600)}h</td>
+      <td>${u.provider}</td>
+      <td><span class="badge ${u.active ? 'on':'off'}">${u.active ? 'Active':'Disabled'}</span></td>
+      <td>
+        <button class="btn ${u.active ? 'sm-red':'sm-green'}"
+          onclick="toggleUser(${u.id}, ${u.active ? 0 : 1})">
+          ${u.active ? 'Disable':'Enable'}
+        </button>
+      </td>
+    </tr>
+  `).join('') : '<tr><td colspan="6" class="empty">No users found</td></tr>';
+
+  // Daily stats
+  const dbody = document.getElementById('daily-body');
+  dbody.innerHTML = stats.daily?.length ? stats.daily.map(d => `
+    <tr>
+      <td>${d.date}</td>
+      <td>${d.requests?.toLocaleString()}</td>
+      <td>${d.tokens?.toLocaleString()}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="3" class="empty">No data</td></tr>';
+}
+
+async function createUser(e) {
+  e.preventDefault();
+  const body = {
+    username: document.getElementById('f-username').value,
+    quota_per_window: parseInt(document.getElementById('f-quota').value),
+    window_seconds: parseInt(document.getElementById('f-window').value),
+    provider: document.getElementById('f-provider').value,
+  };
+  const res = await fetch(`${BASE}/admin/users`, { method: 'POST', headers: adminHeaders(), body: JSON.stringify(body) });
+  if (res.ok) { toast('User created'); document.getElementById('f-username').value = ''; load(); }
+  else toast('Failed to create', 'var(--red)');
+}
+
+async function toggleUser(id, active) {
+  await fetch(`${BASE}/admin/users/${id}`, { method: 'PATCH', headers: adminHeaders(), body: JSON.stringify({ active }) });
+  load();
+}
+</script>
+</body>
+</html>

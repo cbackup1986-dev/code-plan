@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  code-plan-proxy:
+    build: .
+    container_name: code-plan-proxy
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
