@@ -1,7 +1,7 @@
 /**
  * Pure JS file-based storage — no native compilation needed
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, promises as fs } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -68,6 +68,23 @@ export function recordUsage(entry) {
   if (log.length > 10000) log.splice(0, log.length - 10000);
   saveJSON('usage_log.json', log);
 }
+
+export async function recordConversation(reqId, data) {
+  // 记录完整的对话内容及元数据，采用异步 JSONL 格式，便于回归和大规模观测
+  const entry = {
+    reqId,
+    ...data,
+    created_at: new Date().toISOString()
+  };
+  const line = JSON.stringify(entry) + '\n';
+  const logFile = join(DATA_DIR, 'regression_log.jsonl');
+  try {
+    await fs.appendFile(logFile, line);
+  } catch (err) {
+    console.error('FAILED to record conversation:', err);
+  }
+}
+
 
 export function getStats(userId, days = 7) {
   const since = Date.now() - days * 86400000;

@@ -12,8 +12,81 @@
 import { mapModel, getToolPrefix, OBSERVATION_PROMPT } from './providers.js';
 import { compressMessages } from './context.js';
 
+/**
+ * 将 OpenAI 格式的消息转换为 Anthropic 格式
+ */
+export function openAIToAnthropicMessages(openaiMessages) {
+  return openaiMessages.map(msg => {
+    const { role, content, name, tool_calls, tool_call_id } = msg;
+
+    // 处理工具回复 (OpenAI role: tool)
+    if (role === 'tool') {
+      return {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: tool_call_id,
+            content: content
+          }
+        ]
+      };
+    }
+
+    // 处理助手消息 (可能带工具调用)
+    if (role === 'assistant' && tool_calls) {
+      const blocks = [];
+      if (content) blocks.push({ type: 'text', text: content });
+      
+      tool_calls.forEach(tc => {
+        blocks.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function.name,
+          input: JSON.parse(tc.function.arguments || '{}')
+        });
+      });
+      return { role: 'assistant', content: blocks };
+    }
+
+    // 处理普通内容
+    if (typeof content === 'string') {
+      return { role, content };
+    }
+
+    if (Array.isArray(content)) {
+      const blocks = content.map(b => {
+        if (typeof b === 'string') return { type: 'text', text: b };
+        if (b.type === 'text') return { type: 'text', text: b.text };
+        if (b.type === 'image_url') {
+          const url = b.image_url?.url || '';
+          if (url.startsWith('data:')) {
+            const match = url.match(/^data:(image\/\w+);base64,(.*)$/);
+            if (match) {
+              return {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: match[1],
+                  data: match[2]
+                }
+              };
+            }
+          }
+          return { type: 'image', source: { type: 'url', url } };
+        }
+        if (b.type === 'image' || b.type === 'audio' || b.type === 'input_audio') return b;
+        return b;
+      });
+      return { role, content: blocks };
+    }
+
+    return { role, content: String(content || '') };
+  });
+}
+
 // ─── Anthropic → OpenAI ────────────────────────────────────────────────────
-export function convertRequest(anthropicBody, provider) {
+export function convertRequest(anthropicBody, provider, topicOptions = null) {
   const messages = [];
   const prefix = getToolPrefix(provider);
 
@@ -42,9 +115,11 @@ export function convertRequest(anthropicBody, provider) {
     injectObservationIfNeeded(messages);
   }
 
-  // 上下文压缩
+  // ★ 上下文压缩（话题感知）
   const maxTokens = provider.maxContextTokens || 60000;
-  const compressed = compressMessages(messages, maxTokens);
+  const topicInfo = topicOptions?.topic || null;
+  const topicTags = topicOptions?.topicTags || null;
+  const compressed = compressMessages(messages, maxTokens, topicInfo, topicTags);
 
   // Tools
   const tools = anthropicBody.tools?.map(t => ({
@@ -104,9 +179,10 @@ function convertMessage(msg, requiresReasoningPlaceholder = false) {
     }).join('\n').trim();
   }
 
-  // ★ 历史记录清洗：将旧的占位符 "Thought process preserved." 映射到新的 " "
+  // ★ 历史记录清洗：将旧的占位符映射到新的 " "
   // 避免 Kimi-K2.5 看到历史中的旧占位符后出现死循环、退化或重复输出
-  if (reasoningStr === 'Thought process preserved.') {
+  const placeholders = [' ', 'Thought process preserved.', 'NO', 'Thinking', 'Thinking...'];
+  if (placeholders.includes(reasoningStr)) {
     reasoningStr = ' ';
   }
 
@@ -228,10 +304,12 @@ export function convertResponse(openaiResp, originalModel, requestId, provider) 
   }
 
   // ★ 提取推理内容
-  if (message.reasoning_content) {
+  const rContent = message.reasoning_content;
+  const isPlaceholder = [' ', 'Thought process preserved.', 'NO', 'Thinking', 'Thinking...'].includes(rContent);
+  if (rContent && !isPlaceholder) {
     content.push({
       type: 'thinking',
-      thinking: message.reasoning_content
+      thinking: rContent
     });
   }
 

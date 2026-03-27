@@ -11,8 +11,10 @@
   "dependencies": {
     "better-sqlite3": "^11.0.0",
     "express": "^4.19.2",
+    "formdata-node": "^6.0.3",
     "lowdb": "^7.0.1",
     "node-fetch": "^3.3.2",
+    "sharp": "^0.34.5",
     "uuid": "^9.0.1"
   }
 }

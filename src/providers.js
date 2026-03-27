@@ -33,6 +33,19 @@ export const OBSERVATION_PROMPT = `\
 - 下一步应该做什么？
 </observe>`;
 
+export const VISION_CONFIG = {
+  endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
+  apiKey: process.env.SILICONFLOW_API_KEY || '',
+  model: 'Qwen/Qwen2.5-VL-32B-Instruct', // 综合识别能力最强
+  prompt: '请详细且准确地描述这张图片。如果是 UI 界面，请描述布局、文字和交互元素；如果是代码或报错，请提取核心内容；如果是架构图或逻辑图，请描述关键节点和流向。直接输出描述内容，不要解释。'
+};
+
+export const AUDIO_CONFIG = {
+  endpoint: 'https://api.siliconflow.cn/v1/audio/transcriptions',
+  apiKey: process.env.SILICONFLOW_API_KEY || '',
+  model: 'FunAudioLLM/SenseVoiceSmall', // 支持中英日语，速度极快且带标点
+};
+
 export const PROVIDERS = {
   glm: {
     name: 'GLM (智谱)',
@@ -41,6 +54,7 @@ export const PROVIDERS = {
     injectPrefix: true,
     injectObservation: false,   // 在 tool result 后注入观察推理
     stripThinking: false,      // GLM 不输出 <think>，无需过滤
+    multimodal: true,          // GLM-4V 系列支持多模态
     maxContextTokens: 60000,
     timeoutMs: 120000,
     modelMap: {
@@ -62,6 +76,7 @@ export const PROVIDERS = {
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 55000,
+    multimodal: false,         // DeepSeek 原生暂不支持图片（V3/R1）
     timeoutMs: 150000,
     modelMap: {
       'claude-opus-4-20250514': 'deepseek-chat',
@@ -83,6 +98,7 @@ export const PROVIDERS = {
     injectObservation: false,  // R1 自己会反思
     stripThinking: true,       // ★ 过滤 <think> 块，不透传给 Claude Code
     maxContextTokens: 55000,
+    multimodal: false,
     timeoutMs: 180000,         // R1 推理慢，给更长超时
     modelMap: {
       'claude-opus-4-20250514': 'deepseek-reasoner',
@@ -101,9 +117,10 @@ export const PROVIDERS = {
     apiKey: process.env.QWEN_API_KEY || '',
     injectPrefix: true,
     injectObservation: false,
-    stripThinking: false,
-    maxContextTokens: 60000,
-    timeoutMs: 120000,
+  stripThinking: false,
+  maxContextTokens: 60000,
+  multimodal: true,          // GLM-4V 系列支持多模态
+  timeoutMs: 120000,
     modelMap: {
       'claude-opus-4-20250514': 'qwen-max',
       'claude-opus-4-5': 'qwen-max',
@@ -123,6 +140,7 @@ export const PROVIDERS = {
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 30000,
+    multimodal: false,
     timeoutMs: 300000,
     modelMap: {
       default: process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b',
@@ -136,6 +154,7 @@ export const PROVIDERS = {
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 60000,
+    multimodal: false,
     timeoutMs: 180000,
     modelMap: {
       'claude-opus-4-20250514': 'moonshotai/kimi-k2.5',
@@ -148,22 +167,23 @@ export const PROVIDERS = {
     },
   },
   deepseek_sf: {
-    name: 'SiliconFlow DeepSeek (V3)',
+    name: 'SiliconFlow DeepSeek (V3.2)',
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
     apiKey: process.env.SILICONFLOW_API_KEY || '',
     injectPrefix: true,
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 64000,
+    multimodal: false,         // 默认走 V3.2，不支持图片
     timeoutMs: 180000,
     modelMap: {
-      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3',
-      'claude-opus-4-5': 'deepseek-ai/DeepSeek-V3',
-      'claude-sonnet-4-20250514': 'deepseek-ai/DeepSeek-V3',
-      'claude-sonnet-4-5': 'deepseek-ai/DeepSeek-V3',
+      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3.2',
+      'claude-opus-4-5': 'deepseek-ai/DeepSeek-V3.2',
+      'claude-sonnet-4-20250514': 'deepseek-ai/DeepSeek-V3.2',
+      'claude-sonnet-4-5': 'deepseek-ai/DeepSeek-V3.2',
       'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-72B-Instruct',
       'claude-haiku-4-5': 'Qwen/Qwen2.5-72B-Instruct',
-      default: 'deepseek-ai/DeepSeek-V3',
+      default: 'deepseek-ai/DeepSeek-V3.2',
     },
   },
   kimi_sf: {
@@ -175,6 +195,7 @@ export const PROVIDERS = {
     stripThinking: false,
     requiresReasoningPlaceholder: true, // 修复 400 错误
     maxContextTokens: 64000,
+    multimodal: false,
     timeoutMs: 180000,
     modelMap: {
       'claude-opus-4-20250514': 'Pro/moonshotai/Kimi-K2.5',
@@ -195,10 +216,11 @@ export const PROVIDERS = {
     stripThinking: false,
     requiresReasoningPlaceholder: true, // 修复 Kimi-K2.5 400 错误
     maxContextTokens: 64000,
+    multimodal: false,
     timeoutMs: 180000,
     modelMap: {
-      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3', // 最强逻辑推理
-      'claude-opus-4-5': 'deepseek-ai/DeepSeek-V3',
+      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3.2', // 最强逻辑推理
+      'claude-opus-4-5': 'deepseek-ai/DeepSeek-V3.2',
       'claude-sonnet-4-20250514': 'Pro/moonshotai/Kimi-K2.5', // 最佳代码结构与交互体验
       'claude-sonnet-4-5': 'Pro/moonshotai/Kimi-K2.5',
       'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-Coder-32B-Instruct', // 极速短小代码处理

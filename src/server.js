@@ -13,16 +13,26 @@ import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UNHANDLED REJECTION:', reason);
+});
+
 import {
-  getUserByKey, getUsers, createUser, updateUser,
-  checkAndConsumeQuota, recordUsage, getStats,
+  getUsers, getUserByKey, createUser, updateUser,
+  checkAndConsumeQuota, recordUsage, recordConversation
 } from './db.js';
 import {
-  convertRequest, convertResponse,
+  convertRequest, convertResponse, openAIToAnthropicMessages,
   mapStopReason, ToolCallAccumulator, ThinkingFilter, repairJSON,
 } from './converter.js';
-import { getProvider } from './providers.js';
+import { getProvider, VISION_CONFIG, AUDIO_CONFIG } from './providers.js';
 import { routeRequest } from './router.js';
+import { processMultimodalMessages } from './multimodal.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -79,14 +89,18 @@ function anthropicError(type, message) {
 }
 
 // ─── 带超时和重试的 fetch ──────────────────────────────────────────────────
-async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2) {
+async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2, signal = null) {
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const TIMEOUT_MS = timeoutMs || 60000;
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+
+    // 组合外部 signal
+    const combinedSignal = signal ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
 
     try {
-      const res = await fetch(url, { ...options, signal: ctrl.signal });
+      const res = await fetch(url, { ...options, signal: combinedSignal });
       clearTimeout(timer);
 
       if (res.ok) return res;
@@ -120,14 +134,108 @@ app.get(['/v1/models', '/models'], authenticate, (req, res) => {
   res.json({
     object: 'list',
     data: [
-      { id: 'claude-sonnet-4-20250514',  object: 'model', created: 1700000000, owned_by: 'anthropic' },
-      { id: 'claude-opus-4-20250514',    object: 'model', created: 1700000000, owned_by: 'anthropic' },
-      { id: 'claude-haiku-4-5-20251001', object: 'model', created: 1700000000, owned_by: 'anthropic' },
-      { id: 'claude-sonnet-4-5',         object: 'model', created: 1700000000, owned_by: 'anthropic' },
-      { id: 'claude-opus-4-5',           object: 'model', created: 1700000000, owned_by: 'anthropic' },
-      { id: 'claude-haiku-4-5',          object: 'model', created: 1700000000, owned_by: 'anthropic' },
+      { 
+        id: 'claude-3-5-sonnet-20241022', 
+        object: 'model', created: 1729555200, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 8192
+      },
+      { 
+        id: 'claude-3-5-sonnet-20240620', 
+        object: 'model', created: 1718841600, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 8192
+      },
+      { 
+        id: 'claude-3-5-sonnet-latest', 
+        object: 'model', created: 1729555200, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 8192
+      },
+      { 
+        id: 'claude-3-opus-20240229', 
+        object: 'model', created: 1709164800, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 4096
+      },
+      { 
+        id: 'claude-3-sonnet-20240229', 
+        object: 'model', created: 1709164800, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 4096
+      },
+      { 
+        id: 'claude-3-haiku-20240307', 
+        object: 'model', created: 1709769600, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 4096
+      },
+      { 
+        id: 'claude-sonnet-4-20250514', 
+        object: 'model', created: 1700000000, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: true },
+        input: ['text', 'image'],
+        max_tokens: 16384
+      },
+      { 
+        id: 'claude-opus-4-20250514', 
+        object: 'model', created: 1700000000, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: true },
+        input: ['text', 'image'],
+        max_tokens: 16384
+      },
+      { 
+        id: 'cluade-sonnet-4-6', 
+        object: 'model', created: 1700000000, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: true },
+        input: ['text', 'image'],
+        max_tokens: 16384
+      },
+      // 常用别名
+      { 
+        id: 'claude-3-5-sonnet', 
+        object: 'model', created: 1720000000, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: false },
+        input: ['text', 'image'],
+        max_tokens: 8192
+      },
+      { 
+        id: 'claude-3-7-sonnet', 
+        object: 'model', created: 1740000000, owned_by: 'anthropic',
+        capabilities: { vision: true, tool_use: true, thinking: true },
+        input: ['text', 'image'],
+        max_tokens: 16384
+      }
     ],
+
   });
+});
+
+// ─── /v1/sf/models — 直接请求硅基模型列表 ★ ──────────────────────────────────
+app.get('/v1/sf/models', authenticate, async (req, res) => {
+  const apiKey = process.env.SILICONFLOW_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'SILICONFLOW_API_KEY not configured' });
+  }
+
+  try {
+    const sfRes = await fetch('https://api.siliconflow.cn/v1/models', {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+    if (!sfRes.ok) {
+      return res.status(sfRes.status).json({ error: `SiliconFlow API error: ${sfRes.status}` });
+    }
+    const data = await sfRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── /v1/messages ──────────────────────────────────────────────────────────
@@ -137,6 +245,9 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   const requestId = randomUUID();
   const isStream = body.stream === true;
   const originalModel = body.model || 'claude-sonnet-4-20250514';
+
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
 
   const quota = checkAndConsumeQuota(user.id, user.quota_per_window, user.window_seconds);
   if (!quota.allowed) {
@@ -172,7 +283,45 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
       }
     : provider;
 
-  const converted = convertRequest(body, effectiveProvider);
+  // ★ 话题信息：从路由结果中提取，传给 convertRequest
+  const topicOptions = routeDecision?.topic
+    ? { topic: routeDecision.topic, topicTags: routeDecision.topicTags }
+    : null;
+
+  // ★ 伪多模态处理：如果模型不支持多模态，则自动转换图片或语音为文字
+  const hasMultimodalInput = (msgs) => msgs?.some(m => {
+    if (!m.content) return false;
+    const check = (content) => {
+      if (typeof content === 'string') return false;
+      if (!Array.isArray(content)) return false;
+      return content.some(b => {
+        if (['image', 'audio', 'image_url', 'input_audio'].includes(b.type)) return true;
+        if (b.type === 'tool_result' && b.content) return check(b.content);
+        return false;
+      });
+    };
+    return check(m.content);
+  });
+
+  if (!effectiveProvider.multimodal && hasMultimodalInput(body.messages)) {
+    log('info', requestId, 'pseudo_multimodal_triggered', { model: originalModel });
+    try {
+      const processed = await processMultimodalMessages(
+        body.messages, 
+        VISION_CONFIG, 
+        AUDIO_CONFIG,
+        (level, sub, msg, data) => log(level, requestId, `${sub}_${msg}`, data),
+        controller.signal
+      );
+      if (processed.isChanged) {
+        body.messages = processed.messages;
+      }
+    } catch (err) {
+      log('error', requestId, 'pseudo_multimodal_failed', { error: err.message });
+    }
+  }
+
+  const converted = convertRequest(body, effectiveProvider, topicOptions);
   const startTime = Date.now();
 
   log('info', requestId, 'request', {
@@ -185,6 +334,12 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
       routed_model: routeDecision.model,
       route_method: routeDecision.method,
       route_latency_ms: routeDecision.latency_ms,
+      // ★ 话题追踪日志
+      topic_movement: routeDecision.topic?.movement,
+      topic_current: routeDecision.topic?.currentTopic
+        ? `${routeDecision.topic.currentTopic.domain}/${routeDecision.topic.currentTopic.topic}/${routeDecision.topic.currentTopic.subtopic}`
+        : null,
+      topic_stack_size: routeDecision.topic?.stack?.length,
     } : {}),
     stream: isStream,
     messages: body.messages?.length,
@@ -213,6 +368,8 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
         body: JSON.stringify(converted),
       },
       provider.timeoutMs || 120000,
+      2,
+      controller.signal
     );
   } catch (err) {
     log('error', requestId, 'fetch_failed', { error: err.message });
@@ -235,20 +392,40 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('X-Quota-Remaining', String(quota.remaining));
 
-    const usage = await handleStream(backendRes.body, res, originalModel, requestId, provider, startTime);
+    handleStream(backendRes.body, res, originalModel, requestId, provider, startTime, controller.signal)
+      .then(metrics => {
+        log('info', requestId, 'stream_done', {
+          latency_ms: Date.now() - startTime,
+          input_tokens: metrics.input, output_tokens: metrics.output,
+          thinking_tokens: metrics.thinking,
+        });
 
-    log('info', requestId, 'stream_done', {
-      latency_ms: Date.now() - startTime,
-      input_tokens: usage.input, output_tokens: usage.output,
-      thinking_tokens: usage.thinking,
-    });
+        recordUsage({
+          user_id: user.id, request_id: requestId,
+          claude_model: originalModel, backend_model: converted.model,
+          input_tokens: metrics.input, output_tokens: metrics.output,
+          latency_ms: Date.now() - startTime,
+        });
 
-    recordUsage({
-      user_id: user.id, request_id: requestId,
-      claude_model: originalModel, backend_model: converted.model,
-      input_tokens: usage.input, output_tokens: usage.output,
-      latency_ms: Date.now() - startTime,
-    });
+        // 异步记录完整对话，用于回归和观测
+        recordConversation(requestId, {
+          user_id: user.id,
+          request: {
+            model: originalModel,
+            messages: body.messages,
+            tools: body.tools
+          },
+          response: {
+            content: metrics.fullContent,
+            usage: { input_tokens: metrics.input, output_tokens: metrics.output }
+          },
+          latency_ms: Date.now() - startTime
+        });
+      })
+      .catch(err => {
+        log('error', requestId, 'handle_stream_failed', { error: err.message });
+      });
+
   } else {
     const data = await backendRes.json();
     const response = convertResponse(data, originalModel, requestId, provider);
@@ -274,13 +451,277 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   }
 });
 
+// ─── /v1/chat/completions ──────────────────────────────────────────────────
+app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req, res) => {
+  const { user } = req;
+  const body = req.body;
+  const requestId = randomUUID();
+  const isStream = body.stream === true;
+  const originalModel = body.model || 'gpt-4o';
+
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+
+  const quota = checkAndConsumeQuota(user.id, user.quota_per_window, user.window_seconds);
+  if (!quota.allowed) {
+    const resetISO = new Date(quota.resetAt * 1000).toISOString();
+    return res.status(429).json({ error: { message: `配额已用尽，将于 ${resetISO} 重置`, type: 'rate_limit_error' } });
+  }
+
+  const provider = getProvider(user.provider || 'nvidia');
+  const anthropicMessages = openAIToAnthropicMessages(body.messages || []);
+
+  // ★ 智能路由 (OpenAI 端点也走同样的路由逻辑)
+  let routeDecision = null;
+  if (provider.isRouter) {
+    try {
+      routeDecision = await routeRequest(
+        anthropicMessages,
+        body.tools, // OpenAI tools 格式不同，但 router 现在只看 messages
+        originalModel,
+        { apiKey: provider.apiKey, endpoint: provider.endpoint },
+      );
+    } catch (err) {
+      log('warn', requestId, 'router_failed', { error: err.message });
+    }
+  }
+
+  const effectiveProvider = routeDecision
+    ? {
+        ...provider,
+        endpoint: provider.backendEndpoint || provider.endpoint + '/chat/completions',
+        modelMap: { default: routeDecision.model },
+      }
+    : provider;
+
+  // 这里的 hasMultimodalInput 已经统一
+
+  let processedMessages = anthropicMessages;
+  if (!effectiveProvider.multimodal && hasMultimodalInput(anthropicMessages)) {
+    log('info', requestId, 'pseudo_multimodal_triggered_openai', { model: originalModel });
+    try {
+      const processed = await processMultimodalMessages(
+        anthropicMessages, 
+        VISION_CONFIG, 
+        AUDIO_CONFIG,
+        (level, sub, msg, data) => log(level, requestId, `openai_${sub}_${msg}`, data),
+        controller.signal
+      );
+      if (processed.isChanged) {
+        processedMessages = processed.messages;
+      }
+    } catch (err) {
+      log('error', requestId, 'pseudo_multimodal_failed_openai', { error: err.message });
+    }
+  }
+
+  // 后端大部分都是 OpenAI 协议，这里做一次 convertRequest 主要是为了处理工具定义的映射和模型名映射
+  const converted = convertRequest({ ...body, messages: processedMessages }, effectiveProvider);
+  
+  // 如果已经中止，不再继续
+  if (controller.signal.aborted) {
+    log('warn', requestId, 'aborted_before_fetch');
+    return;
+  }
+  const startTime = Date.now();
+
+  log('info', requestId, 'request_openai', {
+    user: user.username,
+    model: originalModel,
+    backend: converted.model,
+    provider: user.provider,
+    stream: isStream,
+  });
+
+  const forwardEndpoint = routeDecision
+    ? (provider.backendEndpoint || provider.endpoint + '/chat/completions')
+    : provider.endpoint;
+
+  let backendRes;
+  try {
+    backendRes = await fetchWithRetry(
+      forwardEndpoint,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${provider.apiKey}`,
+        },
+        body: JSON.stringify(converted),
+      },
+      provider.timeoutMs || 120000,
+      2, // OpenAI endpoint retry count
+      controller.signal
+    );
+  } catch (err) {
+    if (res.writableEnded || res.closed) return;
+    log('error', requestId, 'fetch_failed_openai', { error: err.message });
+    return res.status(502).json({ error: { message: err.message, type: 'api_error' } });
+  }
+
+  if (res.writableEnded || res.closed) {
+    log('warn', requestId, 'client_closed_before_response_openai');
+    return;
+  }
+
+  if (!backendRes.ok) {
+    const txt = await backendRes.text().catch(() => '');
+    log('error', requestId, 'backend_error_openai', { status: backendRes.status, body: txt.slice(0, 300) });
+    return res.status(502).json({ error: { message: `Backend error ${backendRes.status}`, type: 'api_error' } });
+  }
+
+  if (isStream) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    handleOpenAIStream(backendRes.body, res, requestId, provider, startTime, controller.signal)
+      .then(metrics => {
+        recordUsage({
+          user_id: user.id, request_id: requestId,
+          claude_model: originalModel, backend_model: converted.model,
+          input_tokens: metrics.input, output_tokens: metrics.output,
+          latency_ms: Date.now() - startTime,
+        });
+
+        // 异步记录完整对话
+        recordConversation(requestId, {
+          user_id: user.id,
+          request: {
+            model: originalModel,
+            messages: body.messages,
+          },
+          response: {
+            content: metrics.fullContent,
+            usage: { input_tokens: metrics.input, output_tokens: metrics.output }
+          },
+          latency_ms: Date.now() - startTime
+        });
+      })
+      .catch(err => {
+        if (!res.writableEnded && !res.closed) {
+          log('error', requestId, 'handle_openai_stream_failed', { error: err.message });
+        }
+      });
+  } else {
+    const data = await backendRes.json();
+    res.json(data);
+    recordUsage({
+      user_id: user.id, request_id: requestId,
+      claude_model: originalModel, backend_model: converted.model,
+      input_tokens: data.usage?.prompt_tokens || 0,
+      output_tokens: data.usage?.completion_tokens || 0,
+      latency_ms: Date.now() - startTime,
+    });
+  }
+});
+
+// ─── OpenAI 格式流处理 ───────────────────────────────────────────────────────
+async function handleOpenAIStream(stream, res, requestId, provider, startTime, signal = null) {
+  let inputTokens = 0, outputTokens = 0;
+  let fullContent = []; 
+  const thinkFilter = provider.stripThinking ? new ThinkingFilter() : null;
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // 内部累加器
+  let currentText = '';
+  let currentThinking = '';
+  const toolAcc = new ToolCallAccumulator();
+
+  try {
+    for await (const chunk of stream) {
+      if (signal?.aborted) {
+        log('warn', requestId, 'stream_aborted_openai');
+        break;
+      }
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const jsonStr = trimmed.slice(5).trim();
+        if (jsonStr === '[DONE]') {
+          res.write('data: [DONE]\n\n');
+          continue;
+        }
+
+        let data;
+        try { data = JSON.parse(jsonStr); } catch { continue; }
+
+        if (data.usage) {
+          inputTokens = data.usage.prompt_tokens;
+          outputTokens = data.usage.completion_tokens;
+        }
+
+        const delta = data.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        // 积累文本内容
+        if (delta.content) {
+          currentText += delta.content;
+          const filtered = thinkFilter ? thinkFilter.feed(delta.content) : delta.content;
+          if (filtered) {
+             delta.content = filtered;
+          } else {
+             delete delta.content;
+          }
+        }
+
+        // 积累推理内容
+        if (delta.reasoning_content) {
+          currentThinking += delta.reasoning_content;
+        }
+
+        // 积累工具调用
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            toolAcc.accumulate(tc.index, tc);
+          }
+        }
+
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
+    }
+  } catch (err) {
+
+    if (!res.writableEnded && !res.closed) {
+      log('error', requestId, 'stream_error_openai', { error: err.message });
+    }
+  } finally {
+    if (!res.writableEnded) {
+      res.end();
+    }
+  }
+
+  // 组装最终 content
+  if (currentThinking) fullContent.push({ type: 'thinking', thinking: currentThinking });
+  if (currentText) fullContent.push({ type: 'text', text: currentText });
+
+  const finalTools = toolAcc.getFinalToolCalls();
+  for (const tc of finalTools) {
+    fullContent.push({
+      type: 'tool_use',
+      id: tc.id || `call_${randomUUID().slice(0, 8)}`,
+      name: tc.function.name,
+      input: JSON.parse(tc.function.arguments || '{}')
+    });
+  }
+
+  return { input: inputTokens, output: outputTokens, fullContent };
+}
+
+
+
 // ─── 流式处理 ★ 完整修复版 ───────────────────────────────────────────────────
-async function handleStream(stream, res, originalModel, requestId, provider, startTime) {
+async function handleStream(stream, res, originalModel, requestId, provider, startTime, signal = null) {
   const msgId = `msg_${requestId.replace(/-/g, '').slice(0, 24)}`;
   let inputTokens = 0, outputTokens = 0;
+  let fullContent = []; // 存储完整的 Anthropic content blocks
 
   const send = (event, data) => {
-    console.log(`DEBUG [${requestId}] send event: ${event}`, JSON.stringify(data).slice(0, 150));
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
@@ -311,6 +752,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
 
   let buffer = '';
   let thinkingContent = '';
+  let textContent = '';
 
   // Kimi-K2.5 私有格式：工具调用通过 reasoning_content 传出，带特殊标记
   let kimiReasoningBuf = '';   // 积累全部 reasoning_content
@@ -321,6 +763,10 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
 
   // tool block 映射：OpenAI tool index -> Anthropic block index
   const validToolBlockIndices = new Map();
+  
+  let stopReason = 'stop';
+  let finalOutput = 0;
+  let thinkingTokens = 0;
 
   let chunkCount = 0;
   const pingInterval = setInterval(() => {
@@ -332,6 +778,10 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
   try {
     const decoder = new TextDecoder();
     for await (const chunk of stream) {
+      if (signal?.aborted) {
+        log('warn', requestId, 'stream_aborted');
+        break;
+      }
       chunkCount++;
       if (chunkCount === 1) {
         clearInterval(pingInterval);
@@ -358,7 +808,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
 
         // ── 文本 delta ──────────────────────────────────────────────────────
         if (delta.content) {
-          console.log(`DEBUG [${requestId}] content:`, delta.content);
+          textContent += delta.content;
           const text = thinkFilter ? thinkFilter.feed(delta.content) : delta.content;
           if (text) {
             // reasoning block 如果还开着，先关掉
@@ -403,9 +853,9 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
             // 正常 thinking 内容，发给客户端
             const text = delta.reasoning_content;
 
-            // ★ 改进：如果推理内容仅仅是单个空格或特定的占位符，且还没有真正的思考内容，直接忽略
+            // ★ 改进：如果推理内容仅仅是单个空格或特定的占位符（如 "NO", "Thinking"），且还没有真正的思考内容，直接忽略
             // 避免在 UI 中产生一个空洞的 "Thinking" 块。只有当内容非占位符时才开启 block。
-            const isPlaceholder = (text === ' ' || text === 'Thought process preserved.');
+            const isPlaceholder = [' ', 'Thought process preserved.', 'NO', 'Thinking', 'Thinking...'].includes(text);
             if (isPlaceholder && !thinkingContent) {
               continue;
             }
@@ -470,6 +920,12 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
                   name: tc.function?.name || '',
                 },
               });
+              fullContent.push({
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.function?.name || '',
+                input: ''
+              });
             }
 
             const blockIdx = validToolBlockIndices.get(idx);
@@ -478,23 +934,22 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
                 type: 'content_block_delta', index: blockIdx,
                 delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
               });
+              // 累积到 fullContent
+              const block = fullContent.find(b => b.id === tc.id || (b.type === 'tool_use' && b.name === tc.function.name));
+              if (block) {
+                block.input = (block.input || '') + tc.function.arguments;
+              }
             }
           }
           toolAcc.feed(delta.tool_calls);
         }
       }
     }
-  } catch (err) {
-    log('error', requestId, 'stream_error', { error: err.message });
-  } finally {
-    clearInterval(pingInterval);
-  }
 
   // ── Kimi 私有格式工具调用解析 ────────────────────────────────────────────
-  // 如果检测到了 <|tool_calls_section_begin|>，从积累的 buf 里解析工具调用
-  // 格式示例（reasoning_content 积累后）：
-  //   ...正常思考...<|tool_calls_section_begin|>[{"name":"browser","parameters":{...}}]
-  if (kimiInToolSection && kimiReasoningBuf.includes('<|tool_calls_section_begin|>')) {
+  // 仅在明确是 Kimi 模型时才处理
+  const isKimi = originalModel.toLowerCase().includes('kimi');
+  if (isKimi && kimiInToolSection && kimiReasoningBuf.includes('<|tool_calls_section_begin|>')) {
     try {
       const marker = '<|tool_calls_section_begin|>';
       const jsonStart = kimiReasoningBuf.indexOf(marker) + marker.length;
@@ -548,7 +1003,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
     } catch (err) {
       log('warn', requestId, 'kimi_toolcall_parse_failed', { error: err.message, buf: kimiReasoningBuf.slice(-200) });
     }
-  }
+  } // 结束 for await (const chunk of stream)
 
   // ★ 修复：按独立 index 关闭各 block，顺序：reasoning → text → tools
   if (reasoningBlockOpen) {
@@ -572,28 +1027,51 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
     send('content_block_stop', { type: 'content_block_stop', index: 0 });
   }
 
-  // ★ 修复：stop_reason 必须在所有 block 关闭后判断
-  // 只要有工具调用，无论 finish_reason 是什么，都返回 tool_use
-  // 这修复了 finish_reason 为 null/stop 时 OpenClaw loop 中断的问题
-  const stopReason = hasToolCalls ? 'tool_use' : mapStopReason(finishReason, false);
+    // ★ 修复：stop_reason 必须在所有 block 关闭后判断
+    // 只要有工具调用，无论 finish_reason 是什么，都返回 tool_use
+    // 这修复了 finish_reason 为 null/stop 时 OpenClaw loop 中断的问题
+    stopReason = hasToolCalls ? 'tool_use' : mapStopReason(finishReason, false);
 
-  const finalOutput = usageFromChunk?.completion_tokens || outputTokens;
-  inputTokens = usageFromChunk?.prompt_tokens || 0;
+    finalOutput = usageFromChunk?.completion_tokens || outputTokens;
+    inputTokens = usageFromChunk?.prompt_tokens || 0;
 
-  const thinkingTokens = thinkFilter
-    ? Math.ceil(thinkFilter.getThinking().length / 4)
-    : Math.ceil(thinkingContent.length / 4);
+    thinkingTokens = thinkFilter
+      ? Math.ceil(thinkFilter.getThinking().length / 4)
+      : Math.ceil(thinkingContent.length / 4);
 
-  send('message_delta', {
-    type: 'message_delta',
-    delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: finalOutput },
-  });
-  send('message_stop', { type: 'message_stop' });
-  res.end();
+    send('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: finalOutput },
+    });
+    send('message_stop', { type: 'message_stop' });
+  } catch (err) {
+    if (!res.writableEnded && !res.closed) {
+      log('error', requestId, 'stream_error', { error: err.message });
+    }
+  } finally {
+    clearInterval(pingInterval);
+    if (!res.writableEnded && !res.closed) {
+      res.end();
+    }
+  }
+    if (thinkingContent) fullContent.push({ type: 'thinking', thinking: thinkingContent });
+    if (textContent)     fullContent.push({ type: 'text', text: textContent });
+    
+    // 工具调用：从 toolAcc 中获取解析后的结果
+    const finalTools = toolAcc.getCompleted();
+    for (const tc of finalTools) {
+      fullContent.push({
+        type: 'tool_use',
+        id: tc.id,
+        name: tc.function.name,
+        input: JSON.parse(tc.function.arguments || '{}')
+      });
+    }
 
-  return { input: inputTokens, output: finalOutput, thinking: thinkingTokens };
+    return { input: inputTokens, output: finalOutput, thinking: thinkingTokens, fullContent };
 }
+
 
 // ─── Admin ─────────────────────────────────────────────────────────────────
 const ADMIN_KEY = process.env.ADMIN_KEY || 'admin-secret-change-me';
