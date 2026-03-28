@@ -36,10 +36,12 @@ import {
   getProvider,
   VISION_CONFIG,
   AUDIO_CONFIG,
+  TTS_CONFIG,
   IS_OFFLINE
 } from './providers.js';
 import { routeRequest } from './router.js';
-import { processMultimodalMessages } from './multimodal.js';
+import { processMultimodalMessages, hasMultimodalInput } from './multimodal.js';
+import { synthesize, SentenceSplitter } from './tts.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -391,7 +393,8 @@ app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    handleOpenAIStream(backendRes.body, res, requestId, provider, startTime, controller.signal)
+    const enableTTS = body.modalities?.includes('audio') || (body.audio && !body.audio.disabled);
+    handleOpenAIStream(backendRes.body, res, requestId, provider, startTime, enableTTS, controller.signal)
       .then(metrics => {
         recordUsage({ user_id: user.id, request_id: requestId, claude_model: originalModel, backend_model: converted.model, input_tokens: metrics.input, output_tokens: metrics.output, latency_ms: Date.now() - startTime });
         recordConversation(requestId, { user_id: user.id, request: { model: originalModel, messages: body.messages }, response: { content: metrics.fullContent, usage: { input_tokens: metrics.input, output_tokens: metrics.output } }, latency_ms: Date.now() - startTime });
@@ -405,10 +408,11 @@ app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req
 });
 
 // ─── OpenAI 格式流处理（修复 accumulate/getFinalToolCalls） ─────────────────
-async function handleOpenAIStream(stream, res, requestId, provider, startTime, signal = null) {
+async function handleOpenAIStream(stream, res, requestId, provider, startTime, enableTTS = false, signal = null) {
   let inputTokens = 0, outputTokens = 0;
   let fullContent = [];
   const thinkFilter = provider.stripThinking ? new ThinkingFilter() : null;
+  const ttsSplitter = enableTTS ? new SentenceSplitter() : null;
   const decoder = new TextDecoder();
   let buffer = '';
 
@@ -441,6 +445,23 @@ async function handleOpenAIStream(stream, res, requestId, provider, startTime, s
         if (delta.content) {
           currentText += delta.content;
           const filtered = thinkFilter ? thinkFilter.feed(delta.content) : delta.content;
+          
+          if (ttsSplitter && filtered) {
+            const sentences = ttsSplitter.feed(filtered);
+            for (const s of sentences) {
+              (async () => {
+                try {
+                  const audio = await synthesize(s, provider.ttsConfig || TTS_CONFIG, signal);
+                  if (!res.writableEnded) {
+                    res.write(`data: ${JSON.stringify({
+                      choices: [{ delta: { audio: { data: audio.toString('base64'), transcript: s } } }]
+                    })}\n\n`);
+                  }
+                } catch (e) { log('warn', requestId, 'tts_stream_failed', { error: e.message }); }
+              })();
+            }
+          }
+
           if (filtered) delta.content = filtered;
           else delete delta.content;
         }
@@ -451,6 +472,20 @@ async function handleOpenAIStream(stream, res, requestId, provider, startTime, s
         if (delta.tool_calls) toolAcc.feed(delta.tool_calls);
 
         res.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
+    }
+
+    if (ttsSplitter) {
+      const lastSentence = ttsSplitter.flush();
+      if (lastSentence) {
+        try {
+          const audio = await synthesize(lastSentence, provider.ttsConfig || TTS_CONFIG, signal);
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify({
+              choices: [{ delta: { audio: { data: audio.toString('base64'), transcript: lastSentence } } }]
+            })}\n\n`);
+          }
+        } catch (e) { log('warn', requestId, 'tts_stream_final_failed', { error: e.message }); }
       }
     }
   } catch (err) {
@@ -756,6 +791,41 @@ app.get('/health', (_, res) => res.json({ status: 'ok', ts: Date.now() }));
 app.use((req, res) => {
   log('warn', '-', '404_not_found', { path: req.path, method: req.method });
   res.status(404).json(anthropicError('not_found_error', `Endpoint ${req.path} not found`));
+});
+
+// ─── /v1/audio/speech (TTS) ────────────────────────────────────────────────
+app.post(['/v1/audio/speech', '/audio/speech'], authenticate, async (req, res) => {
+  const { user } = req;
+  const { input, model, voice, response_format } = req.body;
+  const requestId = randomUUID();
+
+  if (!input) {
+    return res.status(400).json({ error: { message: 'Missing input text', type: 'invalid_request_error' } });
+  }
+
+  const provider = getProvider(user.provider || 'nvidia');
+  const ttsConfig = provider.ttsConfig || TTS_CONFIG;
+
+  log('info', requestId, 'tts_request', { user: user.username, model: model || ttsConfig.model, input: input.slice(0, 50) + '...' });
+
+  try {
+    const audioBuffer = await synthesize(input, {
+      ...ttsConfig,
+      model: model || ttsConfig.model,
+      voice: voice || ttsConfig.voice,
+    }, req.signal); // 使用请求的中止信号
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.send(audioBuffer);
+    
+    log('info', requestId, 'tts_done', { size: audioBuffer.length });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return log('warn', requestId, 'tts_aborted');
+    }
+    log('error', requestId, 'tts_failed', { error: err.message });
+    res.status(500).json({ error: { message: err.message, type: 'api_error' } });
+  }
 });
 
 // ─── Start ─────────────────────────────────────────────────────────────────

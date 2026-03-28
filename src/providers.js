@@ -59,6 +59,18 @@ export const AUDIO_CONFIG = IS_OFFLINE ? {
   model: 'FunAudioLLM/SenseVoiceSmall',
 };
 
+export const TTS_CONFIG = IS_OFFLINE ? {
+  endpoint: process.env.LOCAL_TTS_URL || 'http://localhost:8081/v1/audio/speech',
+  apiKey: 'local',
+  model: 'tts-1',
+  voice: 'alloy',
+} : {
+  endpoint: 'https://api.siliconflow.cn/v1/audio/speech',
+  apiKey: process.env.SILICONFLOW_API_KEY || '',
+  model: 'fishaudio/fish-speech-1.5',
+  voice: 'alex',
+};
+
 export const PROVIDERS = {
   glm: {
     name: 'GLM (智谱)',
@@ -254,7 +266,7 @@ export const PROVIDERS = {
     injectPrefix: false,
     injectObservation: false,
     stripThinking: false,
-    isRouter: true,
+    isRouter: false,
     maxContextTokens: 32000,
     multimodal: false,
     timeoutMs: 120000,
@@ -263,6 +275,12 @@ export const PROVIDERS = {
       'claude-sonnet-4-20250514': 'Qwen/Qwen3.5-9B',
       'claude-haiku-4-5': 'Qwen/Qwen3.5-9B',
       default: 'Qwen/Qwen3.5-9B',
+    },
+    ttsConfig: {
+      endpoint: 'https://api.siliconflow.cn/v1/audio/speech',
+      apiKey: process.env.SILICONFLOW_API_KEY || '',
+      model: 'fishaudio/fish-speech-1.5',
+      voice: 'alex',
     },
   },
 
@@ -292,6 +310,12 @@ export const PROVIDERS = {
       endpoint: (process.env.ONEAPI_ENDPOINT || '').replace(/\/chat\/completions$/, '/audio/transcriptions'),
       apiKey: process.env.ONEAPI_API_KEY || '',
       model: process.env.ONEAPI_AUDIO_MODEL || 'whisper-1',
+    },
+    ttsConfig: {
+      endpoint: (process.env.ONEAPI_ENDPOINT || '').replace(/\/chat\/completions$/, '/audio/speech'),
+      apiKey: process.env.ONEAPI_API_KEY || '',
+      model: process.env.ONEAPI_TTS_MODEL || 'tts-1',
+      voice: 'alloy',
     },
   },
 };
