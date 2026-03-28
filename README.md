@@ -74,6 +74,7 @@ claude
 | **DeepSeek** | `deepseek` | `deepseek-chat` / `deepseek-reasoner` | Best value. Native R1 reasoning support. |
 | **Zhipu GLM** | `glm` | `glm-4-plus` | Top-tier Chinese LLM. |
 | **Alibaba Qwen** | `qwen` | `qwen-max` | Excellent instruction following. |
+| **OneAPI** | `oneapi` | `gpt-4o` | **New**. OpenAI-compatible bridge for multiple backends. |
 | **Ollama** | `ollama` | Custom via Environment | Perfect for local/private deployments. |
 
 > [!NOTE]
@@ -83,9 +84,21 @@ claude
 
 ## 📖 Key Features
 - ✅ **Streaming Compatibility**: Native support for Anthropic SSE streaming protocol and tool-use deltas.
+- ✅ **Intelligent Routing**: Automatic model selection based on intent (Code vs. Reasoning).
+- ✅ **Pseudo-Multimodal Pipeline**: Vision (Image-to-Text) and ASR (Audio-to-Text) support for text-only backends.
+- ✅ **Low-Latency Streaming TTS**: Real-time audio chunks synced with text generation.
 - ✅ **Auto-Retry**: Automatic backend retry logic to ensure agent loop stability.
 - ✅ **Quota Management**: Rate-limiting and quota windows per user to control API costs.
 - ✅ **Lightweight Deployment**: Single-file database (LowDB), Docker-native, zero external DB dependencies required.
+
+## ⚙️ Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `GLOBAL_TIMEOUT_MS` | Global override for backend request timeout (ms) | `null` |
+| `ONEAPI_ENDPOINT` | Base URL for OneAPI (e.g. `https://oneapi.example.com/v1`) | `""` |
+| `ONEAPI_API_KEY` | API Key for OneAPI | `""` |
+| `OFFLINE` | Enable local Ollama/Mock modes | `false` |
 
 ## 🤝 Contributing
 Contributions are welcome! Please check [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines and project structure.
