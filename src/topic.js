@@ -58,7 +58,7 @@ const TOPIC_KEYWORDS = [
 
   // ai/ml
   { domain: 'ai', topic: 'llm', subtopic: 'general',
-    keywords: ['llm', 'gpt', 'claude', 'transformer', 'prompt', '大模型', '提示词'] },
+    keywords: ['llm', 'gpt', 'claude', 'transformer', 'prompt', '大模型', '提示词', '[IMAGE_ATTACHED]'] },
   { domain: 'ai', topic: 'ml', subtopic: 'general',
     keywords: ['machine learning', '机器学习', 'model', 'training', '训练', 'neural'] },
 
@@ -116,8 +116,9 @@ export class TopicTracker {
     const userMessages = this.messages.filter(m => m.role === 'user');
     if (userMessages.length === 0) return;
 
-    // ── Phase 1: 构建历史栈（不含最后一条）──
-    const historyMsgs = userMessages.slice(0, -1);
+    // ── Phase 1: 构建历史栈（不含最后一条，且仅分析最近 25 条以保证性能）──
+    const SCAN_WINDOW = 25;
+    const historyMsgs = userMessages.slice(Math.max(0, userMessages.length - SCAN_WINDOW), -1);
     for (let i = 0; i < historyMsgs.length; i++) {
       const text = this._extractText(historyMsgs[i]);
       const topic = this._classifyByKeywords(text);
@@ -188,12 +189,13 @@ export class TopicTracker {
   _extractText(msg) {
     if (typeof msg.content === 'string') return msg.content;
     if (Array.isArray(msg.content)) {
-      return msg.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join(' ');
+      const texts = msg.content.filter(b => b.type === 'text').map(b => b.text);
+      if (msg.content.some(b => b.type === 'image' || b.type === 'image_url')) {
+        texts.push('[IMAGE_ATTACHED]');
+      }
+      return texts.join('\n');
     }
-    return JSON.stringify(msg.content || '');
+    return '';
   }
 
   /**

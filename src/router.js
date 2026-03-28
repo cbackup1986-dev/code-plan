@@ -18,11 +18,44 @@
 import fetch from 'node-fetch';
 import { TopicTracker, buildTopicClassifierPrompt } from './topic.js';
 
+const IS_OFFLINE = process.env.OFFLINE === 'true';
+
 // ─── 路由目标定义 ──────────────────────────────────────────────────────────
-export const ROUTE_TARGETS = {
+export const ROUTE_TARGETS = IS_OFFLINE ? {
+  simple_qa: {
+    label: '本地问答',
+    model: process.env.LOCAL_QA_MODEL || 'qwen2.5:7b',
+    reason: '本地模型，适合通用问答',
+  },
+  code_gen: {
+    label: '本地代码生成',
+    model: process.env.LOCAL_CODE_MODEL || 'qwen2.5-coder:7b',
+    reason: '本地代码模型，支持补全和实现',
+  },
+  code_edit: {
+    label: '本地代码编辑',
+    model: process.env.LOCAL_CODE_MODEL || 'qwen2.5-coder:7b',
+    reason: '本地代码模型，文件级读取与修改',
+  },
+  deep_reasoning: {
+    label: '本地推理',
+    model: process.env.LOCAL_REASON_MODEL || 'llama3.1:8b',
+    reason: '本地逻辑解析',
+  },
+  file_ops: {
+    label: '本地操作',
+    model: process.env.LOCAL_CODE_MODEL || 'qwen2.5-coder:7b',
+    reason: '本地代码模型工具调用',
+  },
+  long_context: {
+    label: '本地长文本',
+    model: process.env.LOCAL_CODE_MODEL || 'qwen2.5-coder:7b',
+    reason: '本地长窗口',
+  },
+} : {
   simple_qa: {
     label: '简单问答',
-    model: 'Qwen/Qwen2.5-7B-Instruct',
+    model: 'Qwen/Qwen3.5-9B',
     reason: '快速轻量，适合问答/解释/翻译',
   },
   code_gen: {
@@ -58,7 +91,7 @@ function quickHeuristic(messages, tools, totalTokens) {
   if (totalTokens > 40000) return 'long_context';
 
   // 有工具定义且消息多 → 文件操作型
-  if (tools?.length > 0 && messages.length > 6) return 'file_ops';
+  if (tools?.length > 0 && messages.length > 5) return 'file_ops';
 
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
   const text = (typeof lastUserMsg?.content === 'string'
@@ -66,25 +99,28 @@ function quickHeuristic(messages, tools, totalTokens) {
     : JSON.stringify(lastUserMsg?.content || '')
   ).toLowerCase();
 
-  // 代码关键词
-  const codeEditKw = ['修改', '重构', 'refactor', 'edit', 'fix', 'bug', '替换', 'replace', '删除'];
-  const codeGenKw  = ['写一个', '实现', 'implement', 'create', 'generate', '生成', '函数', 'function', 'class', '组件'];
-  const reasonKw   = ['为什么', '分析', '设计', '架构', 'architecture', 'design', '方案', '比较', 'tradeoff', '权衡'];
-  const simpleKw   = ['什么是', '解释', 'explain', '翻译', 'translate', '总结', 'summarize'];
+  // 代码及操作关键词
+  const codeEditKw = ['修改', '重构', 'refactor', 'edit', 'fix', 'bug', '替换', 'replace', '删除', '改写', '优化'];
+  const codeGenKw = ['写一个', '实现', 'implement', 'create', 'generate', '生成', '函数', 'function', 'class', '组件', '示例'];
+  const reasonKw = ['为什么', '分析', '设计', '架构', 'architecture', 'design', '方案', '比较', 'tradeoff', '权衡', '原理', '逻辑'];
+  const simpleKw = ['什么是', '解释', 'explain', '翻译', 'translate', '总结', 'summarize', '你好', 'hello', '谁是', '介绍'];
+  const fileOpKw = ['读取文件', 'read file', '写入文件', 'write file', '创建文件', 'delete file', 'ls ', 'dir ', 'grep '];
 
   if (codeEditKw.some(k => text.includes(k))) return 'code_edit';
-  if (codeGenKw.some(k => text.includes(k)))  return 'code_gen';
-  if (reasonKw.some(k => text.includes(k)))   return 'deep_reasoning';
-  if (simpleKw.some(k => text.includes(k)))   return 'simple_qa';
+  if (codeGenKw.some(k => text.includes(k))) return 'code_gen';
+  if (reasonKw.some(k => text.includes(k))) return 'deep_reasoning';
+  if (simpleKw.some(k => text.includes(k))) return 'simple_qa';
+  if (fileOpKw.some(k => text.includes(k))) return 'file_ops';
 
   // 消息短 + 无工具 → 简单问答
-  if (text.length < 200 && !tools?.length) return 'simple_qa';
+  if (text.length < 300 && !tools?.length) return 'simple_qa';
 
   return null; // 需要 LLM 判断
 }
 
 // ─── LLM 意图识别（快速小模型）────────────────────────────────────────────
 async function llmClassify(messages, tools, apiKey, endpoint, topicSummary = null) {
+  if (IS_OFFLINE) return null; // 离线模式禁用 LLM 分类，全写由启发式规则决定
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
   const text = typeof lastUserMsg?.content === 'string'
     ? lastUserMsg.content

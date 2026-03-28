@@ -45,17 +45,32 @@ export function estimateMessagesTokens(messages) {
  * @param {Array} topicTags — 每条消息的话题标签 [{ role, topicKey }]
  */
 export function compressMessages(messages, maxTokens = 60000, topicInfo = null, topicTags = null) {
-  const estimated = estimateMessagesTokens(messages);
-  if (estimated <= maxTokens) return messages;
-
-  console.log(`[context] Compressing: ${estimated} → target ${maxTokens} tokens`);
-
-  // Separate system message
+  const currentTotal = estimateMessagesTokens(messages);
+  const isHugeContext = currentTotal > 10000;
+  
+  // Separate messages early for potential truncation
   const systemMsgs = messages.filter(m => m.role === 'system');
   const chatMsgs = messages.filter(m => m.role !== 'system');
 
-  // Always keep last 20 messages (10 turns) intact
-  const KEEP_TAIL = 20;
+  // ★ 极简模式 (Model Quality Protection)
+  // 即使没超过 maxTokens，如果系统提示太长且话题简单，也进行精简
+  if (topicInfo?.currentTopic?.topic === 'llm' && isHugeContext) {
+    systemMsgs.forEach(m => {
+      if (typeof m.content === 'string' && m.content.length > 2000) {
+        m.content = m.content.slice(0, 1500) + '\n... [系统提示已精简以优化对话响应] ...';
+      }
+    });
+  }
+
+  // 物理限制检查 (Logical Context Window)
+  const estimated = estimateMessagesTokens([...systemMsgs, ...chatMsgs]);
+  if (estimated <= maxTokens) return [...systemMsgs, ...chatMsgs];
+
+  console.log(`[context] Compressing: ${estimated} → target ${maxTokens} tokens`);
+
+  // Always keep last 20 messages (10 turns) intact, 
+  // but if context is already huge (>10k), reduce to keep more system space
+  const KEEP_TAIL = isHugeContext ? 10 : 20; 
   const tail = chatMsgs.slice(-KEEP_TAIL);
   const head = chatMsgs.slice(0, 1); // first user message for context
   const middle = chatMsgs.slice(1, -KEEP_TAIL);
@@ -88,7 +103,7 @@ export function compressMessages(messages, maxTokens = 60000, topicInfo = null, 
   // Compress middle: summarize tool results, truncate large file reads
   // ★ 话题感知：冷话题压缩阈值更低
   const compressed = middle.map((m, i) => {
-    // 获取该消息对应的话题 tag（跳过 system 消息的偏移）
+    // 获取该消息对应的话题 tag
     const tagIndex = i + 1; // +1 因为 head 占了 index 0
     const tag = topicTags?.[systemMsgs.length + tagIndex];
     const isColdTopic = tag && coldTopicKeys.has(tag.topicKey);
@@ -121,6 +136,27 @@ export function compressMessages(messages, maxTokens = 60000, topicInfo = null, 
         return block;
       });
       return { ...m, content: compressed_content };
+    }
+
+    // ★ 视觉注意力保护：如果历史中有多个图片描述，只保留最近 2 个的完整内容
+    // 避免模型（特别是 7B）由于历史描述太详细而导致“注意力偏移”到旧图
+    if (typeof m.content === 'string' && m.content.includes('[图片 #')) {
+      // 找出 middle + tail 中所有的图片序号（仅作参考，重点是位置）
+      const allImageMsgs = [...middle, ...tail].filter(msg => 
+        typeof msg.content === 'string' && msg.content.includes('[图片 #')
+      );
+      
+      // 找到最后 2 个全量保留图片的索引（基于内容匹配）
+      const threshIdx = allImageMsgs.length - 2;
+      const currentImageIdx = allImageMsgs.findIndex(msg => msg.content === m.content);
+      
+      // 如果当前图片不是最后 2 个，且位于 middle 中，则进行激进截断
+      if (currentImageIdx !== -1 && currentImageIdx < threshIdx) {
+        return { 
+          ...m, 
+          content: m.content.slice(0, 100) + '\n... [历史图片描述已简略，如需详情请告知] ...' 
+        };
+      }
     }
 
     // ★ 冷话题的 user/assistant 文本消息也做压缩

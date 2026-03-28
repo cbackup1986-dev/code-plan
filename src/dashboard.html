@@ -76,10 +76,13 @@
       <input id="f-quota" type="number" value="120" min="1" style="width:90px" placeholder="Quota" />
       <input id="f-window" type="number" value="18000" min="60" style="width:100px" placeholder="Window(s)" />
       <select id="f-provider">
-        <option value="nvidia" selected>NVIDIA Build</option>
+        <option value="optimal_sf" selected>SiliconFlow (最佳组合)</option>
+        <option value="fast_sf">SiliconFlow (快速通道)</option>
+        <option value="kimi_sf">SiliconFlow (Kimi K2.5)</option>
+        <option value="deepseek_sf">SiliconFlow (DeepSeek)</option>
+        <option value="nvidia">NVIDIA Build (Legacy)</option>
         <option value="glm">Zhipu GLM</option>
-        <option value="deepseek">DeepSeek</option>
-        <option value="qwen">Alibaba Qwen</option>
+        <option value="oneapi">OneAPI (OpenAI 兼容)</option>
         <option value="ollama">Local Ollama</option>
       </select>
       <button class="btn primary" type="submit">+ Create User</button>

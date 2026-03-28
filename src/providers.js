@@ -33,17 +33,30 @@ export const OBSERVATION_PROMPT = `\
 - 下一步应该做什么？
 </observe>`;
 
-export const VISION_CONFIG = {
+// ─── 离线模式检测 ──────────────────────────────────────────────────────────
+export const IS_OFFLINE = process.env.OFFLINE === 'true';
+
+// ─── 视觉配置 ──────────────────────────────────────────────────────────────
+export const VISION_CONFIG = IS_OFFLINE ? {
+  endpoint: `${process.env.OLLAMA_URL || 'http://localhost:11434'}/v1/chat/completions`,
+  apiKey: 'ollama',
+  model: process.env.LOCAL_VISION_MODEL || 'llava',
+  prompt: '请简洁准确地描述这张图片的核心内容。对于 UI 界面，描述布局和关键元素；对于代码或报错，提取核心信息。直接输出描述。',
+} : {
   endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
   apiKey: process.env.SILICONFLOW_API_KEY || '',
-  model: 'Qwen/Qwen2.5-VL-32B-Instruct', // 综合识别能力最强
-  prompt: '请详细且准确地描述这张图片。如果是 UI 界面，请描述布局、文字和交互元素；如果是代码或报错，请提取核心内容；如果是架构图或逻辑图，请描述关键节点和流向。直接输出描述内容，不要解释。'
+  model: 'Qwen/Qwen3-VL-8B-Instruct',
+  prompt: '请简洁准确地描述这张图片的核心内容。如果是 UI 界面，描述布局、文字和关键交互元素；如果是代码或报错，提取核心信息；如果是架构图或流程图，描述关键节点和流向。直接输出描述，不要解释。',
 };
 
-export const AUDIO_CONFIG = {
+export const AUDIO_CONFIG = IS_OFFLINE ? {
+  endpoint: process.env.LOCAL_ASR_URL || 'http://localhost:8080/v1/audio/transcriptions',
+  apiKey: 'whisper',
+  model: 'whisper-1',
+} : {
   endpoint: 'https://api.siliconflow.cn/v1/audio/transcriptions',
   apiKey: process.env.SILICONFLOW_API_KEY || '',
-  model: 'FunAudioLLM/SenseVoiceSmall', // 支持中英日语，速度极快且带标点
+  model: 'FunAudioLLM/SenseVoiceSmall',
 };
 
 export const PROVIDERS = {
@@ -52,9 +65,9 @@ export const PROVIDERS = {
     endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
     apiKey: process.env.GLM_API_KEY || '',
     injectPrefix: true,
-    injectObservation: false,   // 在 tool result 后注入观察推理
-    stripThinking: false,      // GLM 不输出 <think>，无需过滤
-    multimodal: true,          // GLM-4V 系列支持多模态
+    injectObservation: false,
+    stripThinking: false,
+    multimodal: true,
     maxContextTokens: 60000,
     timeoutMs: 120000,
     modelMap: {
@@ -76,7 +89,7 @@ export const PROVIDERS = {
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 55000,
-    multimodal: false,         // DeepSeek 原生暂不支持图片（V3/R1）
+    multimodal: false,
     timeoutMs: 150000,
     modelMap: {
       'claude-opus-4-20250514': 'deepseek-chat',
@@ -89,23 +102,22 @@ export const PROVIDERS = {
     },
   },
 
-  // DeepSeek-R1 原生推理模型：自带 <think> 链，效果最强
   deepseek_r1: {
     name: 'DeepSeek-R1 (推理)',
     endpoint: 'https://api.deepseek.com/v1/chat/completions',
     apiKey: process.env.DEEPSEEK_API_KEY || '',
-    injectPrefix: false,       // R1 自带推理，不需要额外前缀
-    injectObservation: false,  // R1 自己会反思
-    stripThinking: true,       // ★ 过滤 <think> 块，不透传给 Claude Code
+    injectPrefix: false,
+    injectObservation: false,
+    stripThinking: true,
     maxContextTokens: 55000,
     multimodal: false,
-    timeoutMs: 180000,         // R1 推理慢，给更长超时
+    timeoutMs: 180000,
     modelMap: {
       'claude-opus-4-20250514': 'deepseek-reasoner',
       'claude-opus-4-5': 'deepseek-reasoner',
       'claude-sonnet-4-20250514': 'deepseek-reasoner',
       'claude-sonnet-4-5': 'deepseek-reasoner',
-      'claude-haiku-4-5-20251001': 'deepseek-chat',  // Haiku 省成本
+      'claude-haiku-4-5-20251001': 'deepseek-chat',
       'claude-haiku-4-5': 'deepseek-chat',
       default: 'deepseek-reasoner',
     },
@@ -117,10 +129,10 @@ export const PROVIDERS = {
     apiKey: process.env.QWEN_API_KEY || '',
     injectPrefix: true,
     injectObservation: false,
-  stripThinking: false,
-  maxContextTokens: 60000,
-  multimodal: true,          // GLM-4V 系列支持多模态
-  timeoutMs: 120000,
+    stripThinking: false,
+    maxContextTokens: 60000,
+    multimodal: true,
+    timeoutMs: 120000,
     modelMap: {
       'claude-opus-4-20250514': 'qwen-max',
       'claude-opus-4-5': 'qwen-max',
@@ -146,6 +158,7 @@ export const PROVIDERS = {
       default: process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b',
     },
   },
+
   nvidia: {
     name: 'NVIDIA Build',
     endpoint: 'https://integrate.api.nvidia.com/v1/chat/completions',
@@ -153,6 +166,7 @@ export const PROVIDERS = {
     injectPrefix: false,
     injectObservation: false,
     stripThinking: false,
+    isRouter: true,
     maxContextTokens: 60000,
     multimodal: false,
     timeoutMs: 180000,
@@ -166,6 +180,7 @@ export const PROVIDERS = {
       default: 'moonshotai/kimi-k2.5',
     },
   },
+
   deepseek_sf: {
     name: 'SiliconFlow DeepSeek (V3.2)',
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
@@ -174,7 +189,7 @@ export const PROVIDERS = {
     injectObservation: false,
     stripThinking: false,
     maxContextTokens: 64000,
-    multimodal: false,         // 默认走 V3.2，不支持图片
+    multimodal: false,
     timeoutMs: 180000,
     modelMap: {
       'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3.2',
@@ -186,14 +201,15 @@ export const PROVIDERS = {
       default: 'deepseek-ai/DeepSeek-V3.2',
     },
   },
+
   kimi_sf: {
     name: 'SiliconFlow Kimi (K2.5)',
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
     apiKey: process.env.SILICONFLOW_API_KEY || '',
-    injectPrefix: false,           // Kimi-K2.5 自带推理
+    injectPrefix: false,
     injectObservation: false,
     stripThinking: false,
-    requiresReasoningPlaceholder: true, // 修复 400 错误
+    requiresReasoningPlaceholder: true,
     maxContextTokens: 64000,
     multimodal: false,
     timeoutMs: 180000,
@@ -207,6 +223,7 @@ export const PROVIDERS = {
       default: 'Pro/moonshotai/Kimi-K2.5',
     },
   },
+
   optimal_sf: {
     name: 'SiliconFlow (最佳组合)',
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
@@ -214,18 +231,67 @@ export const PROVIDERS = {
     injectPrefix: true,
     injectObservation: false,
     stripThinking: false,
-    requiresReasoningPlaceholder: true, // 修复 Kimi-K2.5 400 错误
+    isRouter: true,
+    requiresReasoningPlaceholder: true,
     maxContextTokens: 64000,
     multimodal: false,
     timeoutMs: 180000,
     modelMap: {
-      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3.2', // 最强逻辑推理
+      'claude-opus-4-20250514': 'deepseek-ai/DeepSeek-V3.2',
       'claude-opus-4-5': 'deepseek-ai/DeepSeek-V3.2',
-      'claude-sonnet-4-20250514': 'Pro/moonshotai/Kimi-K2.5', // 最佳代码结构与交互体验
+      'claude-sonnet-4-20250514': 'Pro/moonshotai/Kimi-K2.5',
       'claude-sonnet-4-5': 'Pro/moonshotai/Kimi-K2.5',
-      'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-Coder-32B-Instruct', // 极速短小代码处理
+      'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-Coder-32B-Instruct',
       'claude-haiku-4-5': 'Qwen/Qwen2.5-Coder-32B-Instruct',
       default: 'Pro/moonshotai/Kimi-K2.5',
+    },
+  },
+
+  fast_sf: {
+    name: 'SiliconFlow (快速通道)',
+    endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
+    apiKey: process.env.SILICONFLOW_API_KEY || '',
+    injectPrefix: false,
+    injectObservation: false,
+    stripThinking: false,
+    isRouter: true,
+    maxContextTokens: 32000,
+    multimodal: false,
+    timeoutMs: 120000,
+    modelMap: {
+      'claude-opus-4-20250514': 'Qwen/Qwen2.5-14B-Instruct',
+      'claude-sonnet-4-20250514': 'Qwen/Qwen3.5-9B',
+      'claude-haiku-4-5': 'Qwen/Qwen3.5-9B',
+      default: 'Qwen/Qwen3.5-9B',
+    },
+  },
+
+  oneapi: {
+    name: 'OneAPI (OpenAI 兼容)',
+    endpoint: process.env.ONEAPI_ENDPOINT || '',
+    apiKey: process.env.ONEAPI_API_KEY || '',
+    injectPrefix: true,
+    injectObservation: false,
+    stripThinking: false,
+    maxContextTokens: 64000,
+    multimodal: false,
+    timeoutMs: 180000,
+    modelMap: {
+      'claude-opus-4-20250514': 'gpt-4o',
+      'claude-sonnet-4-20250514': 'gpt-4o',
+      'claude-haiku-4-5': 'gpt-4o-mini',
+      default: 'gpt-4o',
+    },
+    visionConfig: {
+      endpoint: process.env.ONEAPI_ENDPOINT || '',
+      apiKey: process.env.ONEAPI_API_KEY || '',
+      model: process.env.ONEAPI_VISION_MODEL || 'gpt-4o',
+      prompt: '请简洁准确地描述这张图片的核心内容。如果是 UI 界面，描述布局、文字和关键交互元素；如果是代码或报错，提取核心信息；如果是架构图或流程图，描述关键节点和流向。直接输出描述，不要解释。',
+    },
+    audioConfig: {
+      endpoint: (process.env.ONEAPI_ENDPOINT || '').replace(/\/chat\/completions$/, '/audio/transcriptions'),
+      apiKey: process.env.ONEAPI_API_KEY || '',
+      model: process.env.ONEAPI_AUDIO_MODEL || 'whisper-1',
     },
   },
 };
