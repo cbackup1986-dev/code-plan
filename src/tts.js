@@ -29,7 +29,8 @@ export async function synthesize(text, config, signal) {
       model,
       input: text,
       voice: voice || 'alloy',
-      response_format: 'mp3',
+      response_format: 'pcm',
+      sample_rate: 16000,
     }),
     signal,
   });

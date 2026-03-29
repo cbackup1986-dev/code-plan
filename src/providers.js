@@ -67,8 +67,8 @@ export const TTS_CONFIG = IS_OFFLINE ? {
 } : {
   endpoint: 'https://api.siliconflow.cn/v1/audio/speech',
   apiKey: process.env.SILICONFLOW_API_KEY || '',
-  model: 'fishaudio/fish-speech-1.5',
-  voice: 'alex',
+  model: 'FunAudioLLM/CosyVoice2-0.5B',
+  voice: 'FunAudioLLM/CosyVoice2-0.5B:alex',
 };
 
 export const PROVIDERS = {
@@ -210,6 +210,7 @@ export const PROVIDERS = {
       'claude-sonnet-4-5': 'deepseek-ai/DeepSeek-V3.2',
       'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-72B-Instruct',
       'claude-haiku-4-5': 'Qwen/Qwen2.5-72B-Instruct',
+      'claude-3-5-sonnet-latest': 'deepseek-ai/DeepSeek-V3.2',
       default: 'deepseek-ai/DeepSeek-V3.2',
     },
   },
@@ -232,12 +233,14 @@ export const PROVIDERS = {
       'claude-sonnet-4-5': 'Pro/moonshotai/Kimi-K2.5',
       'claude-haiku-4-5-20251001': 'Pro/moonshotai/Kimi-K2-Instruct-0905',
       'claude-haiku-4-5': 'Pro/moonshotai/Kimi-K2-Instruct-0905',
+      'claude-3-5-sonnet-latest': 'Pro/moonshotai/Kimi-K2.5',
       default: 'Pro/moonshotai/Kimi-K2.5',
     },
   },
 
   optimal_sf: {
     name: 'SiliconFlow (最佳组合)',
+    isStrongModel: true,
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
     apiKey: process.env.SILICONFLOW_API_KEY || '',
     injectPrefix: true,
@@ -255,6 +258,7 @@ export const PROVIDERS = {
       'claude-sonnet-4-5': 'Pro/moonshotai/Kimi-K2.5',
       'claude-haiku-4-5-20251001': 'Qwen/Qwen2.5-Coder-32B-Instruct',
       'claude-haiku-4-5': 'Qwen/Qwen2.5-Coder-32B-Instruct',
+      'claude-3-5-sonnet-latest': 'Pro/moonshotai/Kimi-K2.5',
       default: 'Pro/moonshotai/Kimi-K2.5',
     },
   },
@@ -263,10 +267,12 @@ export const PROVIDERS = {
     name: 'SiliconFlow (快速通道)',
     endpoint: 'https://api.siliconflow.cn/v1/chat/completions',
     apiKey: process.env.SILICONFLOW_API_KEY || '',
-    injectPrefix: false,
-    injectObservation: false,
-    stripThinking: false,
-    isRouter: false,
+    injectPrefix: true,      // 注入 Prompt
+    injectObservation: true, // ★ 修复：工具返回后强制增加观察提示，防止 Qwen/DeepSeek 中断不再思考
+    stripThinking: false,    // Qwen 自带的 <thought> 如果不需要剥离可以保留
+    isRouter: false,           // ★ 必须设为 true！否则 Qwen 看不懂 Claude Code 原生系统的几十 KB XML 指令
+    disableSmartRouting: true, // ★ 新增：禁用长文本自动升级，强制使用小模型进行极限测试
+    isStrongModel: false,     // Qwen 9B/14B 属于轻量级模型
     maxContextTokens: 32000,
     multimodal: false,
     timeoutMs: 120000,
@@ -274,18 +280,20 @@ export const PROVIDERS = {
       'claude-opus-4-20250514': 'Qwen/Qwen2.5-14B-Instruct',
       'claude-sonnet-4-20250514': 'Qwen/Qwen3.5-9B',
       'claude-haiku-4-5': 'Qwen/Qwen3.5-9B',
+      'claude-3-5-sonnet-latest': 'Qwen/Qwen2.5-14B-Instruct',
       default: 'Qwen/Qwen3.5-9B',
     },
     ttsConfig: {
       endpoint: 'https://api.siliconflow.cn/v1/audio/speech',
       apiKey: process.env.SILICONFLOW_API_KEY || '',
-      model: 'fishaudio/fish-speech-1.5',
-      voice: 'alex',
+      model: 'FunAudioLLM/CosyVoice2-0.5B',
+      voice: 'FunAudioLLM/CosyVoice2-0.5B:alex',
     },
   },
 
   oneapi: {
     name: 'OneAPI (OpenAI 兼容)',
+    isStrongModel: true,
     endpoint: process.env.ONEAPI_ENDPOINT || '',
     apiKey: process.env.ONEAPI_API_KEY || '',
     injectPrefix: true,

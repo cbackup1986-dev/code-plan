@@ -20,6 +20,10 @@ import { TopicTracker, buildTopicClassifierPrompt } from './topic.js';
 
 const IS_OFFLINE = process.env.OFFLINE === 'true';
 
+// ─── 阈值定义 ──────────────────────────────────────────────────────────
+const SYSTEM_PROMPT_MAX_SMALL = 10000;  // 系统提示词超过此长度，升级到强模型
+const TOTAL_TOKENS_MAX_SMALL = 25000;   // 总 Token 超过此长度，升级到强模型
+
 // ─── 路由目标定义 ──────────────────────────────────────────────────────────
 export const ROUTE_TARGETS = IS_OFFLINE ? {
   simple_qa: {
@@ -86,9 +90,17 @@ export const ROUTE_TARGETS = IS_OFFLINE ? {
 };
 
 // ─── 快速规则预判（不消耗 API，< 1ms）────────────────────────────────────
-function quickHeuristic(messages, tools, totalTokens) {
-  // 超长上下文直接路由
-  if (totalTokens > 40000) return 'long_context';
+function quickHeuristic(messages, tools, totalTokens, disableSmartRouting = false) {
+  // 1. 获取系统提示词长度
+  const systemMsg = messages.find(m => m.role === 'system');
+  const systemPromptLen = systemMsg ? (typeof systemMsg.content === 'string' ? systemMsg.content.length : JSON.stringify(systemMsg.content).length) : 0;
+  const systemPromptTokens = Math.ceil(systemPromptLen / 3);
+
+  // 2. 超长上下文或大系统提示词直接路由到强模型
+  if (!disableSmartRouting && (totalTokens > 40000 || systemPromptTokens > 20000)) return 'long_context';
+  
+  // 3. 针对 7B/9B 模型的高负载预警（虽然还没到 40k，但已经开始吃力的区间）
+  const isHeavyContext = totalTokens > TOTAL_TOKENS_MAX_SMALL || systemPromptTokens > SYSTEM_PROMPT_MAX_SMALL;
 
   // 有工具定义且消息多 → 文件操作型
   if (tools?.length > 0 && messages.length > 5) return 'file_ops';
@@ -112,8 +124,10 @@ function quickHeuristic(messages, tools, totalTokens) {
   if (simpleKw.some(k => text.includes(k))) return 'simple_qa';
   if (fileOpKw.some(k => text.includes(k))) return 'file_ops';
 
-  // 消息短 + 无工具 → 简单问答
-  if (text.length < 300 && !tools?.length) return 'simple_qa';
+  if (text.length < 300 && !tools?.length && (disableSmartRouting || !isHeavyContext)) return 'simple_qa';
+
+  // 极限测试时，不管怎么样都默认不升级
+  if (disableSmartRouting && !intent) return 'simple_qa';
 
   return null; // 需要 LLM 判断
 }
@@ -188,8 +202,14 @@ function estimateTokens(messages) {
 
 // ─── 主路由函数 ────────────────────────────────────────────────────────────
 export async function routeRequest(messages, tools, claudeModel, routerConfig) {
+  const disableSmartRouting = !!routerConfig.disableSmartRouting;
   const totalTokens = estimateTokens(messages);
   const startTs = Date.now();
+
+  const systemMsg = messages.find(m => m.role === 'system');
+  const systemPromptLen = systemMsg ? (typeof systemMsg.content === 'string' ? systemMsg.content.length : JSON.stringify(systemMsg.content).length) : 0;
+  const systemPromptTokens = Math.ceil(systemPromptLen / 3);
+  const isHeavyContext = totalTokens > TOTAL_TOKENS_MAX_SMALL || systemPromptTokens > SYSTEM_PROMPT_MAX_SMALL;
 
   // ★ 话题追踪：从消息历史中重建话题状态
   const tracker = new TopicTracker(messages);
@@ -197,7 +217,7 @@ export async function routeRequest(messages, tools, claudeModel, routerConfig) {
   const topicSummary = tracker.getTopicSummary();
 
   // 1. 快速规则预判
-  let intent = quickHeuristic(messages, tools, totalTokens);
+  let intent = quickHeuristic(messages, tools, totalTokens, disableSmartRouting);
   let method = 'heuristic';
 
   // 2. 规则未命中，调用小模型分类（★ 带话题上下文）
@@ -212,7 +232,15 @@ export async function routeRequest(messages, tools, claudeModel, routerConfig) {
     method = intent ? 'llm' : 'fallback';
   }
 
-  // 3. 兜底：Kimi（综合最佳）
+  // 3. 兜底与升级逻辑
+  // 如果分类为 simple_qa 但上下文很重，升级到 code_gen (Kimi) 或 deep_reasoning (DeepSeek)
+  if (intent === 'simple_qa' && !disableSmartRouting) {
+    if (isHeavyContext) {
+      intent = 'deep_reasoning'; // 升级到推理模型以应对复杂上下文
+      method = (method === 'llm' ? 'llm_upgraded' : 'heuristic_upgraded');
+    }
+  }
+
   if (!intent || !ROUTE_TARGETS[intent]) {
     intent = 'code_gen';
     method = 'fallback';
@@ -238,6 +266,13 @@ export async function routeRequest(messages, tools, claudeModel, routerConfig) {
     topic_stack_size: topicResult.stack.length,
   }));
 
+  // 判断是否分类到了小模型 (用于在 converter.js 中开启蒸馏保护)
+  // 通过模型名称中的参数量（如 7b, 8b, 9b, 14b 等）或模型家族来判断
+  const modelNameLower = target.model.toLowerCase();
+  const isSmallModel = /\b([1-9]|1[0-4])b\b/.test(modelNameLower) || 
+                       modelNameLower.includes('mini') || 
+                       modelNameLower.includes('haiku');
+
   return {
     intent,
     model: target.model,
@@ -248,5 +283,7 @@ export async function routeRequest(messages, tools, claudeModel, routerConfig) {
     // ★ 话题信息
     topic: topicResult,
     topicTags: tracker.getMessageTopicTags(),
+    isSmallModel,
+    isHeavyContext,
   };
 }

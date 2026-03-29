@@ -42,9 +42,16 @@ import {
 import { routeRequest } from './router.js';
 import { processMultimodalMessages, hasMultimodalInput } from './multimodal.js';
 import { synthesize, SentenceSplitter } from './tts.js';
+import { handleRealtimeWebSocket } from './realtime.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const app = express();
+const server = await import('http').then(http => http.createServer(app));
+const wss = await import('ws').then(ws => new ws.WebSocketServer({ server, path: '/v1/realtime' }));
+
+wss.on('connection', (ws, req) => {
+  handleRealtimeWebSocket(ws, req);
+});
 app.use(express.json({ limit: '20mb' }));
 
 // ─── CORS ──────────────────────────────────────────────────────────────────
@@ -65,34 +72,27 @@ const GLOBAL_TIMEOUT_MS = parseInt(process.env.GLOBAL_TIMEOUT_MS) || 0;
 function log(level, reqId, msg, data = {}) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
   if (levels[level] < levels[LOG_LEVEL]) return;
-  const line = { ts: new Date().toISOString(), level, reqId, msg, ...data };
-  const str = JSON.stringify(line);
-  console.log(str);
+  const ts = new Date().toISOString();
+  const line = { ts, level, reqId, msg, ...data };
+  
+  // Console format for human readability
+  const color = level === 'error' ? '\x1b[31m' : level === 'warn' ? '\x1b[33m' : '';
+  const reset = '\x1b[0m';
+  const time = ts.slice(11, 19);
+  const shortId = reqId === '-' ? 'SYSTEM' : reqId.slice(0, 8);
+  
+  console.log(`${color}[${time}] [${level.toUpperCase()}] [${shortId}] ${msg}${reset}`, 
+    Object.keys(data).length ? data : '');
+  
   if (LOG_FILE) {
+    const str = JSON.stringify(line);
     appendFile(LOG_FILE, str + '\n', () => {});
   }
 }
 
-// ─── ★ hasMultimodalInput — 模块顶层，消除 /chat/completions 端点的 ReferenceError ──
-function hasMultimodalInput(msgs) {
-  if (!Array.isArray(msgs)) return false;
-  return msgs.some(m => {
-    if (!m.content) return false;
-    const check = (content) => {
-      if (typeof content === 'string') return false;
-      if (!Array.isArray(content)) return false;
-      return content.some(b => {
-        if (['image', 'audio', 'image_url', 'input_audio'].includes(b.type)) return true;
-        if (b.type === 'tool_result' && b.content) return check(b.content);
-        return false;
-      });
-    };
-    return check(m.content);
-  });
-}
 
 // ─── Auth ──────────────────────────────────────────────────────────────────
-function authenticate(req, res, next) {
+export function authenticate(req, res, next) {
   const key = req.headers['x-api-key']
     || (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
   if (!key) {
@@ -109,10 +109,11 @@ function authenticate(req, res, next) {
     return res.status(401).json(anthropicError('authentication_error', 'User account is disabled'));
   }
   req.user = user;
-  next();
+  if (next) next();
+  return user;
 }
 
-function anthropicError(type, message) {
+export function anthropicError(type, message) {
   return { type: 'error', error: { type, message } };
 }
 
@@ -212,7 +213,7 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
     try {
       routeDecision = await routeRequest(
         body.messages || [], body.tools, originalModel,
-        { apiKey: provider.apiKey, endpoint: provider.endpoint },
+        { apiKey: provider.apiKey, endpoint: provider.endpoint, disableSmartRouting: provider.disableSmartRouting },
       );
     } catch (err) {
       log('warn', requestId, 'router_failed', { error: err.message });
@@ -224,7 +225,13 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
     : provider;
 
   const topicOptions = routeDecision?.topic
-    ? { topic: routeDecision.topic, topicTags: routeDecision.topicTags }
+    ? { 
+        topic: routeDecision.topic, 
+        topicTags: routeDecision.topicTags, 
+        isSmallModel: routeDecision.isSmallModel,
+        disableSmartRouting: provider.disableSmartRouting,
+        isHeavyContext: routeDecision.isHeavyContext
+      }
     : null;
 
   // 伪多模态处理
@@ -245,9 +252,9 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   const converted = convertRequest(body, effectiveProvider, topicOptions);
   const startTime = Date.now();
 
-  log('info', requestId, 'request', {
+  log('info', requestId, '[Start] request', {
     user: user.username, model: originalModel, backend: converted.model,
-    provider: user.provider, stream: isStream,
+    provider: user.provider, stream: isStream, ip: req.ip,
     messages: body.messages?.length, hasTools: !!body.tools?.length,
     ...(routeDecision ? {
       routed_intent: routeDecision.intent, routed_model: routeDecision.model,
@@ -292,7 +299,7 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
 
     handleStream(backendRes.body, res, originalModel, requestId, provider, startTime, controller.signal)
       .then(metrics => {
-        log('info', requestId, 'stream_done', { latency_ms: Date.now() - startTime, input_tokens: metrics.input, output_tokens: metrics.output });
+        log('info', requestId, '[End] stream_done', { latency_ms: Date.now() - startTime, input_tokens: metrics.input, output_tokens: metrics.output });
         recordUsage({ user_id: user.id, request_id: requestId, claude_model: originalModel, backend_model: converted.model, input_tokens: metrics.input, output_tokens: metrics.output, latency_ms: Date.now() - startTime });
         recordConversation(requestId, { user_id: user.id, request: { model: originalModel, messages: body.messages, tools: body.tools }, response: { content: metrics.fullContent, usage: { input_tokens: metrics.input, output_tokens: metrics.output } }, latency_ms: Date.now() - startTime });
       })
@@ -300,7 +307,7 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
   } else {
     const data = await backendRes.json();
     const response = convertResponse(data, originalModel, requestId, provider);
-    log('info', requestId, 'response', { latency_ms: Date.now() - startTime, stop_reason: response.stop_reason, input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens });
+    log('info', requestId, '[End] response', { latency_ms: Date.now() - startTime, stop_reason: response.stop_reason, input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens });
     res.setHeader('X-Request-Id', requestId);
     res.setHeader('X-Quota-Remaining', String(quota.remaining));
     res.json(response);
@@ -357,11 +364,21 @@ app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req
     }
   }
 
-  const converted = convertRequest({ ...body, messages: processedMessages }, effectiveProvider);
+  const topicOptions = routeDecision?.topic
+    ? { 
+        topic: routeDecision.topic, 
+        topicTags: routeDecision.topicTags, 
+        isSmallModel: routeDecision.isSmallModel,
+        disableSmartRouting: provider.disableSmartRouting,
+        isHeavyContext: routeDecision.isHeavyContext
+      }
+    : null;
+
+  const converted = convertRequest({ ...body, messages: processedMessages }, effectiveProvider, topicOptions);
   if (controller.signal.aborted) return;
 
   const startTime = Date.now();
-  log('info', requestId, 'request_openai', { user: user.username, model: originalModel, backend: converted.model, provider: user.provider, stream: isStream });
+  log('info', requestId, '[Start] request_openai', { user: user.username, model: originalModel, backend: converted.model, provider: user.provider, stream: isStream, ip: req.ip });
 
   const forwardEndpoint = routeDecision
     ? (provider.backendEndpoint || (provider.endpoint.endsWith('/chat/completions') ? provider.endpoint : provider.endpoint + '/chat/completions'))
@@ -396,19 +413,21 @@ app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req
     const enableTTS = body.modalities?.includes('audio') || (body.audio && !body.audio.disabled);
     handleOpenAIStream(backendRes.body, res, requestId, provider, startTime, enableTTS, controller.signal)
       .then(metrics => {
+        log('info', requestId, '[End] stream_done_openai', { latency_ms: Date.now() - startTime, input_tokens: metrics.input, output_tokens: metrics.output });
         recordUsage({ user_id: user.id, request_id: requestId, claude_model: originalModel, backend_model: converted.model, input_tokens: metrics.input, output_tokens: metrics.output, latency_ms: Date.now() - startTime });
         recordConversation(requestId, { user_id: user.id, request: { model: originalModel, messages: body.messages }, response: { content: metrics.fullContent, usage: { input_tokens: metrics.input, output_tokens: metrics.output } }, latency_ms: Date.now() - startTime });
       })
       .catch(err => { if (!res.writableEnded && !res.closed) log('error', requestId, 'handle_openai_stream_failed', { error: err.message }); });
   } else {
     const data = await backendRes.json();
+    log('info', requestId, '[End] response_openai', { latency_ms: Date.now() - startTime, input_tokens: data.usage?.prompt_tokens || 0, output_tokens: data.usage?.completion_tokens || 0 });
     res.json(data);
     recordUsage({ user_id: user.id, request_id: requestId, claude_model: originalModel, backend_model: converted.model, input_tokens: data.usage?.prompt_tokens || 0, output_tokens: data.usage?.completion_tokens || 0, latency_ms: Date.now() - startTime });
   }
 });
 
 // ─── OpenAI 格式流处理（修复 accumulate/getFinalToolCalls） ─────────────────
-async function handleOpenAIStream(stream, res, requestId, provider, startTime, enableTTS = false, signal = null) {
+export async function handleOpenAIStream(stream, res, requestId, provider, startTime, enableTTS = false, signal = null) {
   let inputTokens = 0, outputTokens = 0;
   let fullContent = [];
   const thinkFilter = provider.stripThinking ? new ThinkingFilter() : null;
@@ -530,6 +549,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
   const toolAcc = new ToolCallAccumulator();
   const suppressedIndices = new Set();
   const validToolBlockIndices = new Map();
+  const pendingToolBlocks = new Map(); // ★ 缓冲分片的 tool call（id/name 可能不在同一个 chunk）
   let hasToolCalls = false;
   let finishReason = null;
   let usageFromChunk = null;
@@ -548,6 +568,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
   let thinkingTokens = 0;
 
   let chunkCount = 0;
+  let hasOutputContent = false; // ★ 必须在循环外声明，追踪整个流是否输出了内容
   const pingInterval = setInterval(() => {
     if (chunkCount === 0) send('ping', { type: 'ping' });
   }, 15000);
@@ -581,7 +602,6 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
         if (chunkFinish) finishReason = chunkFinish;
         if (data.usage) usageFromChunk = data.usage;
         if (!delta) continue;
-
         // ── 文本 delta ────────────────────────────────────────────────────
         if (delta.content) {
           textContent += delta.content;
@@ -594,10 +614,14 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
             if (!textBlockOpen) {
               textBlockIndex = nextBlockIndex++;
               send('content_block_start', { type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+              fullContent.push({ type: 'text', text: '' });
               textBlockOpen = true;
             }
             send('content_block_delta', { type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text } });
+            const block = fullContent[fullContent.length - 1];
+            if (block && block.type === 'text') block.text += text;
             outputTokens++;
+            hasOutputContent = true;
           }
         }
 
@@ -635,6 +659,9 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
         }
 
         // ── 工具调用 delta ────────────────────────────────────────────────
+        // ★ 修复：Qwen/vLLM 等后端经常将 id 和 name 拆分到不同 chunk 中发送
+        //   如果在 name 为空时就向 Anthropic SDK 发送 content_block_start，
+        //   SDK 会因空 name 而崩溃，导致 OpenClaw 界面卡死
         if (delta.tool_calls?.length) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
@@ -643,7 +670,18 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
 
             hasToolCalls = true;
 
-            if (tc.id) {
+            // ── 积累 pending 状态 ──
+            if (!pendingToolBlocks.has(idx) && (tc.id || tc.function?.name)) {
+              pendingToolBlocks.set(idx, { id: tc.id || '', name: tc.function?.name || '', bufferedArgs: '' });
+            } else if (pendingToolBlocks.has(idx)) {
+              const p = pendingToolBlocks.get(idx);
+              if (tc.id && !p.id) p.id = tc.id;
+              if (tc.function?.name && !p.name) p.name += tc.function.name;
+            }
+
+            // ── 尝试 flush：只有当 id 和 name 都已到齐时才发送 ──
+            const pending = pendingToolBlocks.get(idx);
+            if (pending && pending.id && pending.name && !validToolBlockIndices.has(idx)) {
               if (reasoningBlockOpen) {
                 send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex });
                 reasoningBlockOpen = false;
@@ -655,21 +693,63 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
 
               const blockIdx = nextBlockIndex++;
               validToolBlockIndices.set(idx, blockIdx);
-              send('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: tc.id, name: tc.function?.name || '' } });
-              fullContent.push({ type: 'tool_use', id: tc.id, name: tc.function?.name || '', input: '' });
+              send('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: pending.id, name: pending.name } });
+              fullContent.push({ type: 'tool_use', id: pending.id, name: pending.name, input: '' });
+              hasOutputContent = true;
+
+              // flush 之前缓冲的 arguments
+              if (pending.bufferedArgs) {
+                send('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: pending.bufferedArgs } });
+                const block = fullContent.find(b => b.id === pending.id);
+                if (block) block.input = (block.input || '') + pending.bufferedArgs;
+              }
+              pendingToolBlocks.delete(idx);
             }
 
-            const blockIdx = validToolBlockIndices.get(idx);
-            if (blockIdx !== undefined && tc.function?.arguments) {
-              send('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } });
-              const block = fullContent.find(b => b.id === tc.id);
-              if (block) block.input = (block.input || '') + tc.function.arguments;
+            // ── 处理 arguments delta ──
+            if (tc.function?.arguments) {
+              const blockIdx = validToolBlockIndices.get(idx);
+              if (blockIdx !== undefined) {
+                // block 已 flush，直接发送
+                send('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } });
+                const block = fullContent.find(b => b.type === 'tool_use' && validToolBlockIndices.get(idx) === blockIdx);
+                if (block) block.input = (block.input || '') + tc.function.arguments;
+              } else if (pendingToolBlocks.has(idx)) {
+                // block 尚未 flush，缓冲 arguments
+                pendingToolBlocks.get(idx).bufferedArgs += tc.function.arguments;
+              }
             }
           }
           toolAcc.feed(delta.tool_calls);
         }
       }
     }
+
+    // ★ 安全网：流结束时 flush 所有未完成的 pending tool blocks
+    // 如果后端在 id/name 分两个 chunk 发送后就结束了流，我们仍需要发送它们
+    for (const [idx, pending] of pendingToolBlocks.entries()) {
+      if (validToolBlockIndices.has(idx)) continue; // 已经 flush 过
+      // 生成 fallback
+      if (!pending.id) pending.id = `toolu_${requestId.replace(/-/g, '').slice(0, 24)}`;
+      if (!pending.name) {
+        log('warn', requestId, 'tool_call_missing_name', { idx, id: pending.id });
+        pending.name = 'unknown_tool'; // 兜底名称，防止 SDK 崩溃
+      }
+      if (reasoningBlockOpen) { send('content_block_stop', { type: 'content_block_stop', index: reasoningBlockIndex }); reasoningBlockOpen = false; }
+      if (textBlockOpen) { send('content_block_stop', { type: 'content_block_stop', index: textBlockIndex }); textBlockOpen = false; }
+      const blockIdx = nextBlockIndex++;
+      validToolBlockIndices.set(idx, blockIdx);
+      send('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: pending.id, name: pending.name } });
+      fullContent.push({ type: 'tool_use', id: pending.id, name: pending.name, input: '' });
+      hasOutputContent = true;
+      if (pending.bufferedArgs) {
+        send('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: pending.bufferedArgs } });
+        const block = fullContent.find(b => b.id === pending.id);
+        if (block) block.input = (block.input || '') + pending.bufferedArgs;
+      }
+      send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+    }
+    pendingToolBlocks.clear();
 
     // ★ 修复：Kimi 私有格式解析移入 try 块，确保 pingInterval 在 finally 中被清理
     const isKimi = originalModel.toLowerCase().includes('kimi');
@@ -697,6 +777,7 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
           send('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: argsStr } });
           send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
           hasToolCalls = true;
+          hasOutputContent = true;
           validToolBlockIndices.set(`kimi_${i}`, -1);
         }
       } catch (err) {
@@ -712,10 +793,14 @@ async function handleStream(stream, res, originalModel, requestId, provider, sta
       send('content_block_stop', { type: 'content_block_stop', index: blockIdx });
     }
 
-    // 兜底：完全没有内容时
-    if (nextBlockIndex === 0) {
-      send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-      send('content_block_stop', { type: 'content_block_stop', index: 0 });
+    // 兜底：如果整个流只输出了 thinking 却没有输出 text 或 tool_use，注入一个空格
+    // 这是为了满足 Anthropic 协议要求：assistant 消息不能没有非 thinking 内容
+    if (!hasOutputContent) {
+      const idx = nextBlockIndex++;
+      send('content_block_start', { type: 'content_block_start', index: idx, content_block: { type: 'text', text: '' } });
+      send('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: ' ' } });
+      send('content_block_stop', { type: 'content_block_stop', index: idx });
+      textContent = ' '; // ★ 确保日志中记录下由于没输出而被塞入的 fallback 空格
     }
 
     stopReason = hasToolCalls ? 'tool_use' : mapStopReason(finishReason, false);
@@ -776,6 +861,9 @@ app.get('/admin/stats', adminAuth, (req, res) =>
 
 app.get('/v1/usage', authenticate, (req, res) => {
   const { user } = req;
+  const requestId = randomUUID();
+  const startTime = Date.now();
+  log('info', requestId, '[Start] usage_request', { user: user.username, ip: req.ip });
   const quota = checkAndConsumeQuota(user.id, user.quota_per_window, user.window_seconds, true);
   res.json({
     quota_per_window: user.quota_per_window,
@@ -784,6 +872,7 @@ app.get('/v1/usage', authenticate, (req, res) => {
     reset_at: quota.resetAt ? new Date(quota.resetAt * 1000).toISOString() : null,
     stats: getStats(user.id, 7),
   });
+  log('info', requestId, '[End] usage_response', { latency_ms: Date.now() - startTime });
 });
 
 app.get('/health', (_, res) => res.json({ status: 'ok', ts: Date.now() }));
@@ -806,7 +895,7 @@ app.post(['/v1/audio/speech', '/audio/speech'], authenticate, async (req, res) =
   const provider = getProvider(user.provider || 'nvidia');
   const ttsConfig = provider.ttsConfig || TTS_CONFIG;
 
-  log('info', requestId, 'tts_request', { user: user.username, model: model || ttsConfig.model, input: input.slice(0, 50) + '...' });
+  log('info', requestId, '[Start] tts_request', { user: user.username, model: model || ttsConfig.model, input: input.slice(0, 50) + '...', ip: req.ip });
 
   try {
     const audioBuffer = await synthesize(input, {
@@ -818,7 +907,7 @@ app.post(['/v1/audio/speech', '/audio/speech'], authenticate, async (req, res) =
     res.setHeader('Content-Type', 'audio/mpeg');
     res.send(audioBuffer);
     
-    log('info', requestId, 'tts_done', { size: audioBuffer.length });
+    log('info', requestId, '[End] tts_done', { size: audioBuffer.length, latency_ms: Date.now() - startTime });
   } catch (err) {
     if (err.name === 'AbortError') {
       return log('warn', requestId, 'tts_aborted');
@@ -830,7 +919,7 @@ app.post(['/v1/audio/speech', '/audio/speech'], authenticate, async (req, res) =
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`\n🚀 Code Plan Proxy → port ${PORT}`);
   console.log(`📊 Admin  → http://localhost:${PORT}/admin`);
   console.log(`🔑 Admin key: ${ADMIN_KEY}\n`);

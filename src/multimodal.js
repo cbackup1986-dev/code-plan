@@ -40,6 +40,26 @@ export async function processMultimodalMessages(messages, visionConfig, audioCon
   return { isChanged, messages: processedMessages };
 }
 
+/**
+ * 检查是否有图片或音频内容（递归扫描）
+ */
+export function hasMultimodalInput(msgs) {
+  if (!Array.isArray(msgs)) return false;
+  return msgs.some(msg => {
+    if (typeof msg.content === 'string') return false;
+    if (Array.isArray(msg.content)) {
+      return msg.content.some(block => {
+        if (block.type === 'image' || block.type === 'image_url' || block.type === 'audio' || block.type === 'input_audio') return true;
+        if (block.type === 'tool_result' && Array.isArray(block.content)) {
+          return block.content.some(sub => sub.type === 'image' || sub.type === 'image_url' || sub.type === 'audio' || sub.type === 'input_audio');
+        }
+        return false;
+      });
+    }
+    return false;
+  });
+}
+
 // ─── 图片描述 ──────────────────────────────────────────────────────────────
 
 async function describeImagesInMessages(messages, config, logger, signal) {
@@ -352,7 +372,7 @@ async function transcribeAudioInMessages(messages, config, logger, signal) {
   return newMessages;
 }
 
-async function transcribeAudio(audioBlock, config) {
+export async function transcribeAudio(audioBlock, config) {
   const { apiKey, endpoint, model, signal } = config;
 
   let base64Data = '';
@@ -374,8 +394,8 @@ async function transcribeAudio(audioBlock, config) {
     const formData = new FormData();
     formData.append('model', model);
     const audioBuffer = Buffer.from(base64Data, 'base64');
-    const blob = new Blob([audioBuffer], { type: 'audio/mpeg' });
-    formData.append('file', blob, 'audio.mp3');
+    const blob = new Blob([audioBuffer], { type: 'audio/wav' });
+    formData.append('file', blob, 'audio.wav');
 
     const res = await fetch(endpoint, {
       method: 'POST',

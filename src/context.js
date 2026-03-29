@@ -29,6 +29,22 @@ export function estimateMessagesTokens(messages) {
 }
 
 /**
+ * 蒸馏超大系统提示词 (针对 Claude Code 或其他带有巨大上下文的 Agent)
+ * 截断不重要的 <available_skills> 等内容，保留核心约束
+ */
+export function distillSystemPrompt(text, isHeavyContext) {
+  if (!isHeavyContext || typeof text !== 'string') return text;
+
+  let distilled = text;
+  // 如果系统提示词极长（例如超过 15000 字符），尝试压缩不必要的技能详情
+  if (distilled.length > 15000) {
+    distilled = distilled.replace(/<available_skills>[\s\S]*?<\/available_skills>/, '<available_skills>\n[Skills list simplified; use read tool on SKILL.md if needed]\n</available_skills>');
+    distilled = distilled.replace(/<project_context>[\s\S]*?<\/project_context>/, '<project_context>\n[Project context truncated to save tokens. Please read context files if needed.]\n</project_context>');
+  }
+  return distilled;
+}
+
+/**
  * 压缩消息历史，保持在 maxTokens 以内
  *
  * 策略: 优先裁剪中间的 tool 结果消息（通常最长且信息密度最低）
@@ -43,10 +59,13 @@ export function estimateMessagesTokens(messages) {
  * @param {number} maxTokens — 最大 token 数
  * @param {object} topicInfo — 话题检测结果 { currentTopic, movement, returnTarget, stack }
  * @param {Array} topicTags — 每条消息的话题标签 [{ role, topicKey }]
+ * @param {boolean} isSmallModel — 是否路由到了小模型 (如 7B/9B 等)，如果是则更积极地蒸馏系统提示词
  */
-export function compressMessages(messages, maxTokens = 60000, topicInfo = null, topicTags = null) {
+export function compressMessages(messages, maxTokens = 60000, topicInfo = null, topicTags = null, isSmallModel = false) {
   const currentTotal = estimateMessagesTokens(messages);
   const isHugeContext = currentTotal > 10000;
+  // 对于小模型，阈值更低，积极进行蒸馏以保护其注意力
+  const shouldDistillPrompt = isHugeContext || (isSmallModel && currentTotal > 5000);
   
   // Separate messages early for potential truncation
   const systemMsgs = messages.filter(m => m.role === 'system');
@@ -60,6 +79,11 @@ export function compressMessages(messages, maxTokens = 60000, topicInfo = null, 
         m.content = m.content.slice(0, 1500) + '\n... [系统提示已精简以优化对话响应] ...';
       }
     });
+  } else if (shouldDistillPrompt) {
+    // 对超大系统提示词或小模型使用正则蒸馏
+    systemMsgs.forEach(m => {
+      m.content = distillSystemPrompt(m.content, shouldDistillPrompt);
+    });
   }
 
   // 物理限制检查 (Logical Context Window)
@@ -70,7 +94,7 @@ export function compressMessages(messages, maxTokens = 60000, topicInfo = null, 
 
   // Always keep last 20 messages (10 turns) intact, 
   // but if context is already huge (>10k), reduce to keep more system space
-  const KEEP_TAIL = isHugeContext ? 10 : 20; 
+  const KEEP_TAIL = shouldDistillPrompt ? 10 : 20; 
   const tail = chatMsgs.slice(-KEEP_TAIL);
   const head = chatMsgs.slice(0, 1); // first user message for context
   const middle = chatMsgs.slice(1, -KEEP_TAIL);

@@ -10,7 +10,7 @@
  * 6. JSON 自动修复
  */
 import { mapModel, getToolPrefix, OBSERVATION_PROMPT } from './providers.js';
-import { compressMessages } from './context.js';
+import { compressMessages, estimateMessagesTokens } from './context.js';
 
 /**
  * 将 OpenAI 格式的消息转换为 Anthropic 格式
@@ -90,6 +90,14 @@ export function convertRequest(anthropicBody, provider, topicOptions = null) {
   const messages = [];
   const prefix = getToolPrefix(provider);
 
+  // ★ 发掘最终使用的模型名称
+  const mappedModel = mapModel(provider, anthropicBody.model || 'claude-sonnet-4-20250514');
+  const modelNameLower = mappedModel.toLowerCase();
+
+  // ★ 兼容 9B 等小模型：对它们启用系统提示词蒸馏
+  const isSmallModel = topicOptions?.isSmallModel ?? 
+    (/\b([1-9]|1[0-4])b\b/.test(modelNameLower) || modelNameLower.includes('mini') || modelNameLower.includes('haiku'));
+
   // System prompt + CoT 前缀
   if (anthropicBody.system) {
     const text = typeof anthropicBody.system === 'string'
@@ -115,11 +123,27 @@ export function convertRequest(anthropicBody, provider, topicOptions = null) {
     injectObservationIfNeeded(messages);
   }
 
-  // ★ 上下文压缩（话题感知）
+  // ★ 上下文压缩（话题感知与小模型蒸馏）
   const maxTokens = provider.maxContextTokens || 60000;
   const topicInfo = topicOptions?.topic || null;
   const topicTags = topicOptions?.topicTags || null;
-  const compressed = compressMessages(messages, maxTokens, topicInfo, topicTags);
+  const compressed = compressMessages(messages, maxTokens, topicInfo, topicTags, isSmallModel);
+
+  // ★ 获取负载和强制路由开关状态 (如果 isRouter=false 则 topicOptions 为空，需自动计算)
+  const disableSmartRouting = topicOptions?.disableSmartRouting ?? !!provider.disableSmartRouting;
+  let isHeavyContext = topicOptions?.isHeavyContext;
+  if (isHeavyContext === undefined) {
+    const totalTokens = estimateMessagesTokens(messages);
+    isHeavyContext = totalTokens > 25000;
+  }
+
+  // ★ 极限测试警告注入
+  if (disableSmartRouting && isHeavyContext) {
+    compressed.push({
+      role: 'user',
+      content: '[系统要求：当前请求上下文极大，由于禁用了智能路由，你正在极限条件下运行。请在回答的最开头强制输出：“[Proxy提示：当前上下文超长，已使用小模型强行处理]”，然后再继续回答用户的提问或调用工具。]'
+    });
+  }
 
   // Tools
   const tools = anthropicBody.tools?.map(t => ({
@@ -136,7 +160,7 @@ export function convertRequest(anthropicBody, provider, topicOptions = null) {
     : (tools?.length ? 'auto' : undefined);
 
   return {
-    model:      mapModel(provider, anthropicBody.model || 'claude-sonnet-4-20250514'),
+    model:      mappedModel,
     messages:   compressed,
     max_tokens: anthropicBody.max_tokens || 8096,
     temperature: anthropicBody.temperature ?? 0.7,
@@ -144,6 +168,7 @@ export function convertRequest(anthropicBody, provider, topicOptions = null) {
     ...(tools?.length ? { tools, tool_choice: toolChoice } : {}),
   };
 }
+
 
 // ★ 观察后推理注入
 // 在最后一条 tool 消息后插入一条 user 提示，强迫模型评估结果再继续
@@ -381,9 +406,10 @@ export class ThinkingFilter {
     this.inThink = false;
     this.thinking = '';   // 积累思考内容（可记日志）
     this.buf = '';        // 跨 chunk 的不完整标签缓冲
+    this.currentEndTag = '</think>';
   }
 
-  // 输入一段文本，返回去掉 <think>...</think> 后的内容
+  // 输入一段文本，返回去掉 <think>...</think> 或 <thought>...</thought> 后的内容
   feed(text) {
     let input = this.buf + text;
     this.buf = '';
@@ -391,10 +417,29 @@ export class ThinkingFilter {
 
     while (input.length > 0) {
       if (!this.inThink) {
-        const start = input.indexOf('<think>');
+        // 同时查找两种可能的开始标签
+        const thinkStart = input.indexOf('<think>');
+        const thoughtStart = input.indexOf('<thought>');
+        
+        let start = -1;
+        let tagLen = 7;
+        let endTag = '</think>';
+
+        if (thinkStart !== -1 && (thoughtStart === -1 || thinkStart < thoughtStart)) {
+          start = thinkStart;
+          tagLen = 7;
+          endTag = '</think>';
+        } else if (thoughtStart !== -1) {
+          start = thoughtStart;
+          tagLen = 9;
+          endTag = '</thought>';
+        }
+
         if (start === -1) {
-          // 检查末尾是否是 <think> 的部分前缀（跨 chunk）
-          const partial = partialSuffix(input, '<think>');
+          // 检查末尾是否是标签的部分前缀
+          const p1 = partialSuffix(input, '<think>');
+          const p2 = partialSuffix(input, '<thought>');
+          const partial = Math.max(p1, p2);
           if (partial > 0) {
             output += input.slice(0, input.length - partial);
             this.buf = input.slice(input.length - partial);
@@ -403,17 +448,19 @@ export class ThinkingFilter {
           }
           break;
         }
+        
         output += input.slice(0, start);
-        input = input.slice(start + 7);
+        input = input.slice(start + tagLen);
         this.inThink = true;
+        this.currentEndTag = endTag;
       } else {
-        const end = input.indexOf('</think>');
+        const end = input.indexOf(this.currentEndTag);
         if (end === -1) {
           this.thinking += input;
           break;
         }
         this.thinking += input.slice(0, end);
-        input = input.slice(end + 8);
+        input = input.slice(end + this.currentEndTag.length);
         this.inThink = false;
       }
     }
@@ -455,9 +502,13 @@ export function repairJSON(str) {
   return s;
 }
 
-// ─── <think> 块剥离（非流式） ─────────────────────────────────────────────
+// ─── <think>/<thought> 块剥离（非流式） ───────────────────────────────────
 export function stripThinkingBlocks(text) {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/g, ' ')
+    .replace(/<thought>[\s\S]*?<\/thought>/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 function errorResponse(requestId, model, message) {

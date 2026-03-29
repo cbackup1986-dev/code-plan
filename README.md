@@ -77,6 +77,11 @@ claude
 | **OneAPI** | `oneapi` | `gpt-4o` | **New**. OpenAI-compatible bridge for multiple backends. |
 | **Ollama** | `ollama` | Custom via Environment | Perfect for local/private deployments. |
 
+- **低延迟流式 TTS**: 支持 OpenAI 多模态协议，在 `/v1/chat/completions` 中启用 `modalities: ["text", "audio"]` 即可实时流式输出语音。
+- **原生多模态透传**: 在 `src/providers.js` 中设置 `multimodal: true` 即可跳过代理端的 OCR/ASR 转换，直接使用后端模型的原生能力（如 Qwen3.5-VL）。
+- **智能对话路由**: 根据意图自动选择（如 `nvidia` / `siliconflow`），支持代码增强与复杂推理。
+- **多端协议兼容**: 同时支持 OpenAI 指令式和 Anthropic 消息式（Claude）标准。
+
 > [!NOTE]
 > For the NVIDIA provider, we have pre-configured high-performance **Moonshot (Kimi)** models to ensure the best agent performance.
 
@@ -100,12 +105,24 @@ claude
 | `ONEAPI_API_KEY` | API Key for OneAPI | `""` |
 | `OFFLINE` | Enable local Ollama/Mock modes | `false` |
 
+- `ONEAPI_ENDPOINT`, `ONEAPI_API_KEY`: OneAPI / OpenAI 兼容中转配置。
+- `ADMIN_KEY`: 管理后台登录秘钥（默认 `admin`）。
+- `GLOBAL_TIMEOUT_MS`: 全局后端请求超时时间（默认 120s）。
+
 ## 🤝 Contributing
 Contributions are welcome! Please check [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines and project structure.
 
 ---
 
-## ⚖️ Legal Disclaimer
+---
+
+## ⚖️ 免责声明 (Legal Disclaimer)
+
+本项目是一个**非官方、社区驱动的开源项目**。
+- **商标声明**："Anthropic", "Claude", "NVIDIA", "Moonshot", "DeepSeek" 等模型名称均为其各自持有者的商标。在本项目中使用这些名称仅用于兼容性描述。
+- **互操作性**：本工具仅供个人和开发使用，旨在提高不同 AI 工具之间的互操作性。
+- **服务条款合规**：用户有责任遵守其各自所使用的 LLM 供应商（如 NVIDIA, SiliconFlow 等）的服务条款。
+- **责任限制**：本软件的作者不对因使用本工具而导致的任何账户封禁、账单纠纷、法律后果或任何形式的损失负责。
 
 This is an **unofficial, community-driven open-source project**. 
 - **Trademarks**: "Anthropic", "Claude", "NVIDIA", "Moonshot", "DeepSeek", and other model names are trademarks of their respective owners. Their use in this project is strictly for compatibility description purposes.
