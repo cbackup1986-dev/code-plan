@@ -270,18 +270,18 @@ export const PROVIDERS = {
     injectPrefix: true,      // 注入 Prompt
     injectObservation: true, // ★ 修复：工具返回后强制增加观察提示，防止 Qwen/DeepSeek 中断不再思考
     stripThinking: false,    // Qwen 自带的 <thought> 如果不需要剥离可以保留
-    isRouter: false,           // ★ 必须设为 true！否则 Qwen 看不懂 Claude Code 原生系统的几十 KB XML 指令
+    isRouter: true,            // ★ 已开启：Qwen 必须以此模式理解 Claude Code 的 XML 指令
     disableSmartRouting: true, // ★ 新增：禁用长文本自动升级，强制使用小模型进行极限测试
     isStrongModel: false,     // Qwen 9B/14B 属于轻量级模型
     maxContextTokens: 32000,
     multimodal: false,
-    timeoutMs: 120000,
+    timeoutMs: 300000,
     modelMap: {
       'claude-opus-4-20250514': 'Qwen/Qwen2.5-14B-Instruct',
-      'claude-sonnet-4-20250514': 'Qwen/Qwen3.5-9B',
-      'claude-haiku-4-5': 'Qwen/Qwen3.5-9B',
+      'claude-sonnet-4-20250514': 'deepseek-ai/DeepSeek-V3.2',
+      'claude-haiku-4-5': 'deepseek-ai/DeepSeek-V3.2',
       'claude-3-5-sonnet-latest': 'Qwen/Qwen2.5-14B-Instruct',
-      default: 'Qwen/Qwen3.5-9B',
+      default: 'deepseek-ai/DeepSeek-V3.2',
     },
     ttsConfig: {
       endpoint: 'https://api.siliconflow.cn/v1/audio/speech',

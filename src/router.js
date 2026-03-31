@@ -126,8 +126,8 @@ function quickHeuristic(messages, tools, totalTokens, disableSmartRouting = fals
 
   if (text.length < 300 && !tools?.length && (disableSmartRouting || !isHeavyContext)) return 'simple_qa';
 
-  // 极限测试时，不管怎么样都默认不升级
-  if (disableSmartRouting && !intent) return 'simple_qa';
+  // 极限测试时，不管怎么样都默认不简单的问答
+  if (disableSmartRouting) return 'simple_qa';
 
   return null; // 需要 LLM 判断
 }

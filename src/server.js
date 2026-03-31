@@ -141,7 +141,10 @@ async function fetchWithRetry(url, options, timeoutMs, maxRetries = 2, signal = 
       return res;
     } catch (err) {
       clearTimeout(timer);
-      if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs}ms`);
+      if (err.name === 'AbortError') {
+        if (signal?.aborted) throw new Error('Client disconnected');
+        throw new Error(`Request timed out after ${timeoutMs}ms`);
+      }
       lastErr = err;
       if (attempt < maxRetries) await sleep((attempt + 1) * 1500);
     }
@@ -278,6 +281,10 @@ app.post(['/v1/messages', '/messages'], authenticate, async (req, res) => {
       GLOBAL_TIMEOUT_MS || provider.timeoutMs || 120000, 2, controller.signal,
     );
   } catch (err) {
+    if (err.message === 'Client disconnected') {
+      log('info', requestId, 'client_disconnected', { latency_ms: Date.now() - startTime });
+      return;
+    }
     log('error', requestId, 'fetch_failed', { error: err.message });
     return res.status(502).json(anthropicError('api_error', err.message));
   }
@@ -392,6 +399,10 @@ app.post(['/v1/chat/completions', '/chat/completions'], authenticate, async (req
       GLOBAL_TIMEOUT_MS || provider.timeoutMs || 120000, 2, controller.signal,
     );
   } catch (err) {
+    if (err.message === 'Client disconnected') {
+      log('info', requestId, 'client_disconnected_openai', { latency_ms: Date.now() - startTime });
+      return;
+    }
     if (res.writableEnded || res.closed) return;
     log('error', requestId, 'fetch_failed_openai', { error: err.message });
     return res.status(502).json({ error: { message: err.message, type: 'api_error' } });

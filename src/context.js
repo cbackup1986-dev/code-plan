@@ -32,16 +32,66 @@ export function estimateMessagesTokens(messages) {
  * 蒸馏超大系统提示词 (针对 Claude Code 或其他带有巨大上下文的 Agent)
  * 截断不重要的 <available_skills> 等内容，保留核心约束
  */
-export function distillSystemPrompt(text, isHeavyContext) {
+export function distillSystemPrompt(text, isHeavyContext, isSmallModel = false) {
   if (!isHeavyContext || typeof text !== 'string') return text;
 
   let distilled = text;
-  // 如果系统提示词极长（例如超过 15000 字符），尝试压缩不必要的技能详情
-  if (distilled.length > 15000) {
+
+  // ★ 1. 处理 XML 标签格式
+  if (distilled.includes('<available_skills>')) {
     distilled = distilled.replace(/<available_skills>[\s\S]*?<\/available_skills>/, '<available_skills>\n[Skills list simplified; use read tool on SKILL.md if needed]\n</available_skills>');
+  }
+  if (distilled.includes('<project_context>')) {
     distilled = distilled.replace(/<project_context>[\s\S]*?<\/project_context>/, '<project_context>\n[Project context truncated to save tokens. Please read context files if needed.]\n</project_context>');
   }
+
+  // ★ 2. 处理 Markdown 标题格式 (OpenClaw/Claude Code 常用)
+  if (distilled.includes('## Skills (mandatory)')) {
+    distilled = distilled.replace(/## Skills \(mandatory\)[\s\S]*?(?=\n## |$)/, '## Skills (mandatory)\n[Skills list simplified to save tokens.]\n');
+  }
+
+  // ★ 3. 小模型贪婪蒸馏 (Greedy Distillation)
+  if (isSmallModel) {
+    distilled = removeColdSections(distilled);
+    
+    // 如果仍然太长，强制截断 Project Context
+    if (distilled.length > 8000 && distilled.includes('# Project Context')) {
+      const parts = distilled.split('# Project Context');
+      distilled = parts[0] + '# Project Context\n[Project context heavily truncated for small model stability.]\n' + (parts[1].slice(-500)); // 保留末尾的一点点信息
+    }
+  }
+
+  // 兜底补丁：如果系统提示词极长（例如超过 15000 字符），强制裁剪
+  if (distilled.length > 15000 && !isSmallModel) {
+    distilled = distilled.slice(0, 10000) + '\n... [System prompt truncated due to extreme length] ...\n' + distilled.slice(-2000);
+  }
+
   return distilled;
+}
+
+/**
+ * 移除系统提示词中的"冷"章节
+ * 这些章节在 9B/14B 等小模型的极速对话中通常是冗余的
+ */
+function removeColdSections(text) {
+  const coldSections = [
+    /## Safety[\s\S]*?(?=\n## |$)/i,
+    /## OpenClaw CLI Quick Reference[\s\S]*?(?=\n## |$)/i,
+    /## Documentation[\s\S]*?(?=\n## |$)/i,
+    /## Group Chat Context[\s\S]*?(?=\n## |$)/i,
+    /## Reply Tags[\s\S]*?(?=\n## |$)/i,
+    /## Messaging[\s\S]*?(?=\n## |$)/i,
+    /## Memory Recall[\s\S]*?(?=\n## |$)/i,
+    /## Tool Call Style[\s\S]*?(?=\n## |$)/i,
+    /## Model Aliases[\s\S]*?(?=\n## |$)/i
+  ];
+
+  let result = text;
+  coldSections.forEach(regex => {
+    result = result.replace(regex, '');
+  });
+
+  return result.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -62,14 +112,15 @@ export function distillSystemPrompt(text, isHeavyContext) {
  * @param {boolean} isSmallModel — 是否路由到了小模型 (如 7B/9B 等)，如果是则更积极地蒸馏系统提示词
  */
 export function compressMessages(messages, maxTokens = 60000, topicInfo = null, topicTags = null, isSmallModel = false) {
-  const currentTotal = estimateMessagesTokens(messages);
-  const isHugeContext = currentTotal > 10000;
-  // 对于小模型，阈值更低，积极进行蒸馏以保护其注意力
-  const shouldDistillPrompt = isHugeContext || (isSmallModel && currentTotal > 5000);
-  
   // Separate messages early for potential truncation
   const systemMsgs = messages.filter(m => m.role === 'system');
   const chatMsgs = messages.filter(m => m.role !== 'system');
+  
+  const currentTotal = estimateMessagesTokens(messages);
+  const systemPromptStr = systemMsgs.map(m => m.content).join('\n');
+  const isHugeContext = currentTotal > 20000 || systemPromptStr.length > 10000;
+  // 对于小模型，阈值更低且必然触发 greedy，对于大模型，仅在 huge 时执行基础蒸馏
+  const shouldDistillPrompt = isHugeContext || (isSmallModel && currentTotal > 5000);
 
   // ★ 极简模式 (Model Quality Protection)
   // 即使没超过 maxTokens，如果系统提示太长且话题简单，也进行精简
